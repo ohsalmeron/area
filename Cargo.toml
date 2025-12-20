@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/area-wm",
+    "crates/area-shell", 
+    "crates/area-ipc",
+    "crates/area-terminal",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Area Team"]
+license = "MIT"
+repository = "https://github.com/ohsalmeron/area"
+
+[workspace.dependencies]
+# Shared across crates
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+dirs = "5"
+
+# X11 (for area-wm)
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr", "composite", "render", "shape", "xfixes"] }
+
+# Bevy (for area-shell)
+bevy = { version = "0.15", features = ["jpeg"] }
+
+# IPC
+area-ipc = { path = "crates/area-ipc" }

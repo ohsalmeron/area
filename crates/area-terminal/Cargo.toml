@@ -1,0 +1,18 @@
+[package]
+name = "area-terminal"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "area-terminal"
+path = "src/main.rs"
+
+[dependencies]
+alacritty_terminal = "0.25"
+vte = "0.13"
+libc = "0.2"
+mio = "1.0"
+tracing = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

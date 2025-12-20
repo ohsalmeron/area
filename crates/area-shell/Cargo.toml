@@ -1,0 +1,21 @@
+[package]
+name = "area-shell"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "area-shell"
+path = "src/main.rs"
+
+[dependencies]
+area-ipc = { workspace = true }
+bevy = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+dirs = { workspace = true }
+x11rb = { workspace = true }
+image = { version = "0.25", features = ["png", "jpeg"] }

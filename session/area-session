@@ -1,0 +1,53 @@
+#!/bin/bash
+# Area Desktop Session
+# Starts the WM daemon and Bevy shell
+
+set -e
+
+# Export runtime dir
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+# Log file
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/area"
+mkdir -p "$LOG_DIR"
+
+echo "Starting Area Desktop..." > "$LOG_DIR/session.log"
+
+# Start the window manager
+area-wm >> "$LOG_DIR/wm.log" 2>&1 &
+WM_PID=$!
+echo "Started area-wm (PID: $WM_PID)" >> "$LOG_DIR/session.log"
+
+# Wait for IPC socket to appear
+SOCKET_PATH="$XDG_RUNTIME_DIR/area-wm.sock"
+TIMEOUT=10
+while [ ! -S "$SOCKET_PATH" ] && [ $TIMEOUT -gt 0 ]; do
+    sleep 0.1
+    TIMEOUT=$((TIMEOUT - 1))
+done
+
+if [ ! -S "$SOCKET_PATH" ]; then
+    echo "ERROR: WM socket not found after timeout" >> "$LOG_DIR/session.log"
+    kill $WM_PID 2>/dev/null
+    exit 1
+fi
+
+echo "WM socket ready" >> "$LOG_DIR/session.log"
+
+# Start the shell
+area-shell >> "$LOG_DIR/shell.log" 2>&1 &
+SHELL_PID=$!
+echo "Started area-shell (PID: $SHELL_PID)" >> "$LOG_DIR/session.log"
+
+# Handle termination
+cleanup() {
+    echo "Shutting down Area..." >> "$LOG_DIR/session.log"
+    kill $SHELL_PID 2>/dev/null
+    kill $WM_PID 2>/dev/null
+    exit 0
+}
+trap cleanup SIGTERM SIGINT
+
+# Wait for WM to exit (it's the session leader)
+wait $WM_PID
+cleanup

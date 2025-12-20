@@ -1,0 +1,83 @@
+# Rust/Cargo
+target/
+**/target/
+# Cargo.lock should be committed for applications/executables
+# Uncomment the line below if this is a library crate
+# Cargo.lock
+
+# Rust backup files
+**/*.rs.bk
+
+# MSVC Windows builds
+*.pdb
+
+# Editor/IDE files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Log files
+*.log
+xephyr.log
+
+# Python (for fusion-icon)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# C build artifacts (for compiz)
+*.o
+*.a
+*.so
+*.la
+*.lo
+*.gmo
+*.desktop
+*.schemas
+*.moc.cpp
+.pc
+.deps
+.libs
+Makefile
+Makefile.in
+config.h
+config.h.in
+config.log
+config.status
+autom4te.cache/
+m4/
+po/*.pot
+po/stamp-po
+
+# Session files
+*.session
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
