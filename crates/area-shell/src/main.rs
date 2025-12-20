@@ -42,7 +42,8 @@ fn main() -> Result<()> {
                 transparent: true,
                 // Postion at top of screen
                 position: WindowPosition::At(IVec2::new(0, 0)),
-                resolution: (1280.0, 32.0).into(), // Start as bar-only
+                resolution: (1280u32, 32u32).into(), // Start as bar-only
+                present_mode: bevy::window::PresentMode::AutoVsync,
                 ..default()
             }),
             ..default()
@@ -60,7 +61,7 @@ fn main() -> Result<()> {
             overview::OverviewPlugin,
             agent::AgentPlugin,
             wobbly::WobblyPlugin,
-            // compositor::CompositorPlugin, // Disabled until X11 texture sharing works
+            compositor::CompositorPlugin, // Enabled for testing
         ))
         .add_systems(Update, sync_window_size)
         .run();
@@ -72,21 +73,31 @@ fn main() -> Result<()> {
 fn sync_window_size(
     mode: Res<state::ShellMode>,
     mut windows: Query<&mut Window>,
+    mut resize_reader: MessageReader<bevy::window::WindowResized>,
 ) {
+    // Process any window resize messages first (debouncing)
+    let _ = resize_reader.read().count();
+    
     if !mode.is_changed() {
         return;
     }
 
-    if let Ok(mut window) = windows.get_single_mut() {
-        match *mode {
+    if let Ok(mut window) = windows.single_mut() {
+        let target_resolution = match *mode {
             state::ShellMode::Normal => {
                 // Only the bar: height 32
-                window.resolution.set(1280.0, 32.0);
+                (1280.0, 32.0)
             }
             state::ShellMode::Overview | state::ShellMode::Launcher => {
                 // Fullscreen for compositor and overlays: height 720
-                window.resolution.set(1280.0, 720.0);
+                (1280.0, 720.0)
             }
+        };
+        
+        // Only resize if different to avoid unnecessary swap chain reconfigurations
+        let current = window.resolution.size();
+        if current.x != target_resolution.0 || current.y != target_resolution.1 {
+            window.resolution.set(target_resolution.0, target_resolution.1);
         }
     }
 }

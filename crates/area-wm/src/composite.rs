@@ -7,14 +7,12 @@ use x11rb::protocol::composite::{self, ConnectionExt as _, Redirect};
 use x11rb::protocol::xproto::Window;
 use x11rb::rust_connection::RustConnection;
 
-#[allow(dead_code)]
 pub struct CompositeManager {
     pub root: Window,
     pub overlay_window: Window,
 }
 
 impl CompositeManager {
-    #[allow(dead_code)]
     pub fn new(conn: &RustConnection, root: Window) -> Result<Self> {
         // Check if Composite extension is available
         let _composite_info = conn
@@ -50,7 +48,6 @@ impl CompositeManager {
         })
     }
 
-    #[allow(dead_code)]
     pub fn cleanup(&self, conn: &RustConnection) -> Result<()> {
         info!("Releasing overlay window");
         conn.composite_release_overlay_window(self.overlay_window)?;

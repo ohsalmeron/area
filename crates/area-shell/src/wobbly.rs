@@ -2,7 +2,7 @@
 //! Ported and adapted from Compiz's wobbly.c
 
 use bevy::prelude::*;
-use bevy::render::mesh::VertexAttributeValues;
+use bevy::mesh::VertexAttributeValues;
 
 pub struct WobblyPlugin;
 
@@ -45,21 +45,24 @@ impl Default for WobblyGrid {
 }
 
 impl WobblyGrid {
-    pub fn new(pos: Vec2, size: Vec2) -> Self {
+    pub fn new(_pos: Vec2, size: Vec2) -> Self {
         let mut physics = Self {
             target_size: size,
-            target_pos: pos,
+            target_pos: Vec2::ZERO, // Always centered in local space
             ..default()
         };
-        physics.init_points(pos, size);
+        physics.init_points(Vec2::ZERO, size); // Initialize relative to origin
         physics
     }
 
-    fn init_points(&mut self, pos: Vec2, size: Vec2) {
+    fn init_points(&mut self, _pos: Vec2, size: Vec2) {
+        // Initialize points relative to mesh center (origin)
+        // The mesh is created centered, so points should be relative to origin
         for y in 0..GRID_HEIGHT {
             for x in 0..GRID_WIDTH {
-                let px = pos.x + size.x * (x as f32 / (GRID_WIDTH - 1) as f32);
-                let py = pos.y + size.y * (y as f32 / (GRID_HEIGHT - 1) as f32);
+                // Points distributed from -size/2 to +size/2 (centered at origin)
+                let px = size.x * (x as f32 / (GRID_WIDTH - 1) as f32) - size.x / 2.0;
+                let py = size.y * (y as f32 / (GRID_HEIGHT - 1) as f32) - size.y / 2.0;
                 let idx = y * GRID_WIDTH + x;
                 self.points[idx].position = Vec2::new(px, py);
                 self.points[idx].velocity = Vec2::ZERO;
@@ -77,16 +80,18 @@ fn update_wobbly_physics(
 
     for mut grid in &mut query {
         let size = grid.target_size;
-        let pos = grid.target_pos;
+        let pos_offset = grid.target_pos; // Offset from center (used during drag)
 
         // 1. Calculate ideal positions (anchors) and Spring forces
+        // Points are in local space (relative to mesh center at origin)
         for y in 0..GRID_HEIGHT {
             for x in 0..GRID_WIDTH {
                 let idx = y * GRID_WIDTH + x;
                 
-                // Where the point SHOULD be if rigid
-                let target_x = pos.x + size.x * (x as f32 / (GRID_WIDTH - 1) as f32);
-                let target_y = pos.y + size.y * (y as f32 / (GRID_HEIGHT - 1) as f32);
+                // Where the point SHOULD be if rigid (centered mesh, so from -size/2 to +size/2)
+                // Add pos_offset to shift all points (for drag wobble)
+                let target_x = size.x * (x as f32 / (GRID_WIDTH - 1) as f32) - size.x / 2.0 + pos_offset.x;
+                let target_y = size.y * (y as f32 / (GRID_HEIGHT - 1) as f32) - size.y / 2.0 + pos_offset.y;
                 let target = Vec2::new(target_x, target_y);
                 
                 // Spring force pulling towards target
@@ -131,7 +136,7 @@ fn update_wobbly_meshes(
 
 /// Helper to create a subdivided plane mesh for the wobbly effect
 pub fn create_wobbly_mesh(size: Vec2) -> Mesh {
-    let mut mesh = Mesh::new(bevy::render::render_resource::PrimitiveTopology::TriangleList, bevy::render::render_asset::RenderAssetUsages::default());
+    let mut mesh = Mesh::new(bevy::render::render_resource::PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::default());
 
     let mut positions = Vec::new();
     let mut uvs = Vec::new();
@@ -173,7 +178,7 @@ pub fn create_wobbly_mesh(size: Vec2) -> Mesh {
 
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(bevy::render::mesh::Indices::U32(indices));
+    mesh.insert_indices(bevy::mesh::Indices::U32(indices));
 
     mesh
 }
@@ -208,7 +213,7 @@ fn handle_wobbly_drag(
     windows: Query<&Window>,
     mouse: Res<ButtonInput<MouseButton>>,
 ) {
-    if let Ok(window) = windows.get_single() {
+    if let Ok(window) = windows.single() {
         if let Some(cursor_pos) = window.cursor_position() {
             // Convert cursor to world space (centered origin)
             let world_pos = cursor_pos - Vec2::new(window.width() / 2.0, window.height() / 2.0);

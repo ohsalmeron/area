@@ -184,7 +184,7 @@ fn handle_launcher_input(
     mut mode: ResMut<ShellMode>,
     mut state: ResMut<LauncherState>,
     ipc: Res<IpcSender>,
-    mut keyboard_events: EventReader<KeyboardInput>,
+    mut keyboard_events: MessageReader<KeyboardInput>,
 ) {
     if *mode != ShellMode::Launcher {
         return;
@@ -314,7 +314,7 @@ fn render_launcher(
 
     // Clean up existing UI
     for entity in launcher_query.iter() {
-        commands.entity(entity).despawn_recursive();
+        commands.entity(entity).despawn();
     }
 
     if *mode != ShellMode::Launcher {
@@ -350,19 +350,17 @@ fn render_launcher(
                 ))
                 .with_children(|parent| {
                     // Search input
-                    parent.spawn((
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(48.0),
-                            padding: UiRect::all(Val::Px(12.0)),
-                            margin: UiRect::bottom(Val::Px(8.0)),
-                            justify_content: JustifyContent::FlexStart,
-                            align_items: AlignItems::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgba(0.15, 0.15, 0.2, 0.95)),
-                        BorderRadius::all(Val::Px(8.0)),
-                    )).with_children(|parent| {
+                    parent.spawn(Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(48.0),
+                        padding: UiRect::all(Val::Px(12.0)),
+                        margin: UiRect::bottom(Val::Px(8.0)),
+                        justify_content: JustifyContent::FlexStart,
+                        align_items: AlignItems::Center,
+                        border_radius: BorderRadius::all(Val::Px(8.0)),
+                        ..default()
+                    })
+                    .insert(BackgroundColor(Color::srgba(0.15, 0.15, 0.2, 0.95))).with_children(|parent| {
                         let display_text = if state.query.is_empty() {
                             "Type to search...".to_string()
                         } else {
@@ -386,17 +384,15 @@ fn render_launcher(
 
                     // Results list
                     parent
-                        .spawn((
-                            Node {
-                                width: Val::Percent(100.0),
-                                max_height: Val::Px(400.0),
-                                flex_direction: FlexDirection::Column,
-                                overflow: Overflow::clip_y(),
-                                ..default()
-                            },
-                            BackgroundColor(Color::srgba(0.12, 0.12, 0.15, 0.95)),
-                            BorderRadius::all(Val::Px(8.0)),
-                        ))
+                        .spawn(Node {
+                            width: Val::Percent(100.0),
+                            max_height: Val::Px(400.0),
+                            flex_direction: FlexDirection::Column,
+                            overflow: Overflow::clip_y(),
+                            border_radius: BorderRadius::all(Val::Px(8.0)),
+                            ..default()
+                        })
+                        .insert(BackgroundColor(Color::srgba(0.12, 0.12, 0.15, 0.95)))
                         .with_children(|parent| {
                             for (i, &idx) in state.results.iter().take(10).enumerate() {
                                 if let Some(app) = state.apps.get(idx) {
@@ -418,8 +414,8 @@ fn render_launcher(
                                             } else {
                                                 Color::NONE
                                             }),
-                                            AppButton(idx),
                                         ))
+                                        .insert(AppButton(idx))
                                         .with_children(|parent| {
                                             parent.spawn((
                                                 Text::new(&app.name),

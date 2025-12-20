@@ -254,4 +254,77 @@ impl Atoms {
         }
         Ok(String::new())
     }
+
+    /// Set window state (add/remove EWMH states)
+    pub fn set_window_state<C: Connection>(
+        &self,
+        conn: &C,
+        window: Window,
+        add: &[Atom],
+        remove: &[Atom],
+    ) -> Result<()> {
+        // Get current state
+        let mut states = Vec::new();
+        if let Ok(reply) = conn.get_property(
+            false,
+            window,
+            self.net_wm_state,
+            AtomEnum::ATOM,
+            0,
+            1024,
+        )?.reply() {
+            if let Some(value32) = reply.value32() {
+                states = value32.collect();
+            }
+        }
+        
+        // Remove states
+        for atom in remove {
+            states.retain(|&a| a != *atom);
+        }
+        
+        // Add states
+        for atom in add {
+            if !states.contains(atom) {
+                states.push(*atom);
+            }
+        }
+        
+        // Set new state
+        conn.change_property32(
+            PropMode::REPLACE,
+            window,
+            self.net_wm_state,
+            AtomEnum::ATOM,
+            &states,
+        )?;
+        
+        Ok(())
+    }
+
+    /// Send WM_DELETE_WINDOW message to close a window gracefully
+    pub fn send_delete_window<C: Connection>(
+        &self,
+        conn: &C,
+        window: Window,
+    ) -> Result<()> {
+        // Build ClientMessage bytes manually
+        // Format: [response_type(1), unused(1), sequence(2), window(4), type(4), format(1), unused(2), data(20)]
+        let mut event_bytes = [0u8; 32];
+        event_bytes[0] = 33; // ClientMessage
+        event_bytes[4..8].copy_from_slice(&window.to_ne_bytes());
+        event_bytes[8..12].copy_from_slice(&self._wm_protocols.to_ne_bytes());
+        event_bytes[12] = 32; // format (32-bit)
+        event_bytes[16..20].copy_from_slice(&self._wm_delete_window.to_ne_bytes());
+        // Rest of data is zeros (timestamp = 0 = CurrentTime)
+        
+        conn.send_event(
+            false,
+            window,
+            EventMask::NO_EVENT,
+            event_bytes,
+        )?;
+        
+        Ok(())
+    }
 }

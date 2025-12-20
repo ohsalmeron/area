@@ -27,8 +27,5 @@ dirs = "5"
 # X11 (for area-wm)
 x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr", "composite", "render", "shape", "xfixes"] }
 
-# Bevy (for area-shell)
-bevy = { version = "0.15", features = ["jpeg"] }
-
 # IPC
 area-ipc = { path = "crates/area-ipc" }

@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use crate::decorations::WindowFrame;
+
 /// Represents a managed window
 #[derive(Debug, Clone)]
 pub struct Window {
@@ -15,9 +17,13 @@ pub struct Window {
     pub workspace: u8,
     pub mapped: bool,
     pub sticky: bool,
-    pub frame_id: Option<u32>,
-    #[allow(dead_code)]
+    pub frame: Option<WindowFrame>,
     pub maximized: bool,
+    // Restore geometry for unmaximize
+    pub restore_x: i32,
+    pub restore_y: i32,
+    pub restore_width: u32,
+    pub restore_height: u32,
 }
 
 impl Window {
@@ -33,8 +39,12 @@ impl Window {
             workspace: 0,
             mapped: false,
             sticky: false,
-            frame_id: None,
+            frame: None,
             maximized: false,
+            restore_x: 0,
+            restore_y: 0,
+            restore_width: 640,
+            restore_height: 480,
         }
     }
 }

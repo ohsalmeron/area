@@ -3,7 +3,7 @@
 //! Central state that tracks windows, workspaces, and shell mode.
 
 use bevy::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Plugin for shell state management
 pub struct StatePlugin;
@@ -12,8 +12,8 @@ impl Plugin for StatePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShellState>()
             .init_resource::<ShellMode>()
-            .add_event::<WindowEvent>()
-            .add_event::<WorkspaceEvent>();
+            .add_message::<WindowEvent>()
+            .add_message::<WorkspaceEvent>();
     }
 }
 
@@ -42,6 +42,8 @@ pub struct ShellState {
     pub num_workspaces: u8,
     /// Connected to WM
     pub connected: bool,
+    /// Windows currently being dragged
+    pub dragging_windows: HashSet<u32>,
 }
 
 /// State for a single window
@@ -58,8 +60,8 @@ pub struct WindowState {
     pub workspace: u8,
 }
 
-/// Events for window changes
-#[derive(Event, Debug)]
+/// Messages for window changes
+#[derive(Message, Debug)]
 #[allow(dead_code)]
 pub enum WindowEvent {
     Opened(WindowState),
@@ -69,8 +71,8 @@ pub enum WindowEvent {
     GeometryChanged { id: u32, x: i32, y: i32, width: u32, height: u32 },
 }
 
-/// Events for workspace changes
-#[derive(Event, Debug)]
+/// Messages for workspace changes
+#[derive(Message, Debug)]
 #[allow(dead_code)]
 pub enum WorkspaceEvent {
     Changed { current: u8, total: u8 },

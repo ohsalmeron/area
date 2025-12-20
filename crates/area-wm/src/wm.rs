@@ -3,6 +3,7 @@
 use crate::ewmh::Atoms;
 use crate::ipc::{IpcHandle, IpcServer};
 use crate::window::{Window, WindowManager};
+use crate::decorations::{WindowFrame, ButtonType};
 
 use anyhow::{Context, Result};
 use area_ipc::{ShellCommand, WmEvent};
@@ -72,7 +73,8 @@ pub async fn run() -> Result<()> {
     let mut wm = WindowManager::new();
 
     // Initialize Composite extension (redirects all windows to offscreen)
-    // let _composite_manager = crate::composite::CompositeManager::new(&conn, root)?;
+    // This enables efficient window capture in the shell
+    let _composite_manager = crate::composite::CompositeManager::new(&conn, root)?;
 
     // Start IPC server
     let ipc_server = IpcServer::new();
@@ -169,7 +171,9 @@ pub async fn run() -> Result<()> {
                     let state_bits = u16::from(e.state);
                     debug!("ButtonPress: window={}, button={}, state={:x}", e.event, e.detail, state_bits);
 
-                    // Check if Alt is held for window operations
+                    let mut handled = false;
+
+                    // Check if Alt is held for window operations (Alt+Drag anywhere)
                     if state_bits & MOD_MASK != 0 {
                         if e.detail == 1 {
                             // Alt+Left click = start move
@@ -179,16 +183,9 @@ pub async fn run() -> Result<()> {
                                 start_y: e.root_y,
                                 mode: DragMode::Move,
                             });
-                            conn.grab_pointer(
-                                false,
-                                root,
-                                EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
-                                GrabMode::ASYNC,
-                                GrabMode::ASYNC,
-                                x11rb::NONE,
-                                x11rb::NONE,
-                                x11rb::CURRENT_TIME,
-                            )?;
+                            // Notify shell that drag started
+                            ipc.broadcast(WmEvent::WindowDragStarted { id: e.child });
+                            handled = true;
                         } else if e.detail == 3 {
                             // Alt+Right click = start resize
                             drag_state = Some(DragState {
@@ -197,27 +194,101 @@ pub async fn run() -> Result<()> {
                                 start_y: e.root_y,
                                 mode: DragMode::Resize,
                             });
-                            conn.grab_pointer(
-                                false,
-                                root,
-                                EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
-                                GrabMode::ASYNC,
-                                GrabMode::ASYNC,
-                                x11rb::NONE,
-                                x11rb::NONE,
-                                x11rb::CURRENT_TIME,
-                            )?;
+                            // Notify shell that drag started (resize also triggers wobble)
+                            ipc.broadcast(WmEvent::WindowDragStarted { id: e.child });
+                            handled = true;
                         }
+                    } 
+                    
+                    if !handled {
+                        // Check if clicked ON A FRAME (Titlebar/Buttons)
+                        // Iterate windows to find if e.event (screen window) belongs to a frame
+                        let mut action = None;
+                        
+                        for win in wm.all_windows() {
+                            if let Some(frame) = &win.frame {
+                                if frame.contains(e.event) {
+                                    // Found the window!
+                                    // Check if it's a button
+                                    if let Some(btn) = frame.get_button_type(e.event) {
+                                        action = Some((win.id, "button", Some(btn)));
+                                    } else if e.event == frame.titlebar {
+                                        action = Some((win.id, "titlebar", None));
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+
+                        if let Some((win_id, kind, btn_type)) = action {
+                             if kind == "titlebar" && e.detail == 1 {
+                                 // Dragging titlebar
+                                 drag_state = Some(DragState {
+                                    window: win_id,
+                                    start_x: e.root_x,
+                                    start_y: e.root_y,
+                                    mode: DragMode::Move,
+                                });
+                                // Notify shell that drag started
+                                ipc.broadcast(WmEvent::WindowDragStarted { id: win_id });
+                                handled = true;
+                             } else if kind == "button" && e.detail == 1 {
+                                 // Handle button click
+                                 if let Some(btn) = btn_type {
+                                     match btn {
+                                         ButtonType::Close => {
+                                             // Helper to close window
+                                             // Send delete message
+                                             atoms.send_delete_window(&conn, win_id)?;
+                                         }
+                                        ButtonType::Maximize => {
+                                            toggle_maximize(&conn, &atoms, &mut wm, &mut ipc, win_id, screen.root)?;
+                                        }
+                                         ButtonType::Minimize => {
+                                             // Minimize (Unmap)
+                                             conn.unmap_window(if let Some(w) = wm.get_window(win_id) {
+                                                 // Unmap frame if framed
+                                                 w.frame.as_ref().map(|f| f.frame).unwrap_or(win_id)
+                                             } else { win_id })?;
+                                             // Update state
+                                             if let Some(w) = wm.get_window_mut(win_id) {
+                                                 w.mapped = false;
+                                             }
+                                             ipc.broadcast(WmEvent::WindowClosed { id: win_id }); // Or minimized event?
+                                         }
+                                     }
+                                 }
+                                 handled = true;
+                             }
+                        }
+                    }
+
+                    if handled {
+                         conn.grab_pointer(
+                            false,
+                            root,
+                            EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                            GrabMode::ASYNC,
+                            GrabMode::ASYNC,
+                            x11rb::NONE,
+                            x11rb::NONE,
+                            x11rb::CURRENT_TIME,
+                        )?;
                     } else if e.child != 0 && e.child != root {
-                        // Click on window = focus it
+                        // Click on client window = focus it
                         focus_window(&conn, &atoms, &mut wm, &mut ipc, e.child, root)?;
+                        // Replay event so app sees it? 
+                        // If we grabbed ButtonPress on root, we intercept it.
+                        // But we grabbed on Window... so checking e.child != 0 implies click on managed window
+                        conn.allow_events(Allow::REPLAY_POINTER, x11rb::CURRENT_TIME)?;
                     }
                 }
 
                 Event::ButtonRelease(_) => {
-                    if drag_state.is_some() {
+                    if let Some(drag) = drag_state.take() {
+                        // Notify shell that drag ended
+                        ipc.broadcast(WmEvent::WindowDragEnded { id: drag.window });
                         conn.ungrab_pointer(x11rb::CURRENT_TIME)?;
-                        drag_state = None;
                     }
                 }
 
@@ -227,32 +298,81 @@ pub async fn run() -> Result<()> {
                             let dx = e.root_x - drag.start_x;
                             let dy = e.root_y - drag.start_y;
 
-                            if let Some(win) = wm.get_window(drag.window) {
-                                match drag.mode {
-                                    DragMode::Move => {
-                                        let new_x = win.x + dx as i32;
-                                        let new_y = win.y + dy as i32;
+                            // Get window info before mutable borrow
+                            let (old_x, old_y, old_width, old_height) = if let Some(win) = wm.get_window(drag.window) {
+                                (win.x, win.y, win.width, win.height)
+                            } else {
+                                continue;
+                            };
+                            
+                            match drag.mode {
+                                DragMode::Move => {
+                                    let new_x = old_x + dx as i32;
+                                    let new_y = old_y + dy as i32;
+                                    
+                                    // Get frame reference before mutable borrow
+                                    let has_frame = wm.get_window(drag.window).and_then(|w| w.frame.as_ref()).is_some();
+                                    
+                                    if has_frame {
+                                        if let Some(win) = wm.get_window(drag.window) {
+                                            if let Some(frame) = &win.frame {
+                                                frame.move_to(&conn, new_x as i16, new_y as i16)?;
+                                            }
+                                        }
+                                    } else {
                                         conn.configure_window(
                                             drag.window,
                                             &ConfigureWindowAux::new().x(new_x).y(new_y),
                                         )?;
-                                        if let Some(win) = wm.get_window_mut(drag.window) {
-                                            win.x = new_x;
-                                            win.y = new_y;
-                                        }
                                     }
-                                    DragMode::Resize => {
-                                        let new_w = (win.width as i32 + dx as i32).max(100) as u32;
-                                        let new_h = (win.height as i32 + dy as i32).max(100) as u32;
+
+                                    if let Some(win) = wm.get_window_mut(drag.window) {
+                                        win.x = new_x;
+                                        win.y = new_y;
+                                    }
+                                    
+                                    // Send geometry update for smooth compositor updates during drag
+                                    ipc.broadcast(WmEvent::WindowGeometryChanged {
+                                        id: drag.window,
+                                        x: new_x,
+                                        y: new_y,
+                                        width: old_width,
+                                        height: old_height,
+                                    });
+                                }
+                                DragMode::Resize => {
+                                    let new_w = (old_width as i32 + dx as i32).max(100) as u32;
+                                    let new_h = (old_height as i32 + dy as i32).max(100) as u32;
+                                    
+                                    // Get frame reference before mutable borrow
+                                    let has_frame = wm.get_window(drag.window).and_then(|w| w.frame.as_ref()).is_some();
+                                    
+                                    if has_frame {
+                                        if let Some(win) = wm.get_window(drag.window) {
+                                            if let Some(frame) = &win.frame {
+                                                frame.resize(&conn, new_w as u16, new_h as u16)?;
+                                            }
+                                        }
+                                    } else {
                                         conn.configure_window(
                                             drag.window,
                                             &ConfigureWindowAux::new().width(new_w).height(new_h),
                                         )?;
-                                        if let Some(win) = wm.get_window_mut(drag.window) {
-                                            win.width = new_w;
-                                            win.height = new_h;
-                                        }
                                     }
+
+                                    if let Some(win) = wm.get_window_mut(drag.window) {
+                                        win.width = new_w;
+                                        win.height = new_h;
+                                    }
+                                    
+                                    // Send geometry update for smooth compositor updates during resize
+                                    ipc.broadcast(WmEvent::WindowGeometryChanged {
+                                        id: drag.window,
+                                        x: old_x,
+                                        y: old_y,
+                                        width: new_w,
+                                        height: new_h,
+                                    });
                                 }
                             }
 
@@ -327,23 +447,28 @@ fn manage_window(
         (x, y, width, height)
     };
 
-    // TODO: Re-enable window frames after implementing proper event forwarding
-    // For now, just configure and map the window directly
-    conn.configure_window(
-        window,
-        &ConfigureWindowAux::new()
-            .x(x)
-            .y(y)
-            .width(width)
-            .height(height)
-            .border_width(2),
-    )?;
-    
-    conn.change_window_attributes(
-        window,
-        &ChangeWindowAttributesAux::new()
-            .border_pixel(0x4a90d9), // Blue border
-    )?;
+    // Create frame if not shell
+    let (_final_x, _final_y, _final_w, _final_h, frame) = if class != "area-shell" {
+        let frame = WindowFrame::new(conn, screen, window, x as i16, y as i16, width as u16, height as u16)?;
+        
+        // When framed, the window ID we track is still the client, 
+        // but its x/y should be the frame's x/y
+        (x, y, width, height, Some(frame))
+    } else {
+        // Just map shell directly
+        conn.configure_window(
+            window,
+            &ConfigureWindowAux::new()
+                .x(x)
+                .y(y)
+                .width(width)
+                .height(height)
+                .border_width(0),
+        )?;
+        
+        conn.map_window(window)?;
+        (x, y, width, height, None)
+    };
     
     // Grab Alt+Button1 for moving and Alt+Button3 for resizing
     conn.grab_button(
@@ -383,13 +508,16 @@ fn manage_window(
     win.sticky = class == "area-shell";
     win.mapped = true;
     win.workspace = wm.current_workspace();
-    win.frame_id = None; // Frames disabled for now
+    win.frame = frame.clone(); // Store frame info
+    
+    // Send Frame ID if present to shell so it can capture the decoration!
+    let notify_id = frame.as_ref().map(|f| f.frame).unwrap_or(window);
 
     wm.add_window(win);
 
     // Notify shell
     ipc.broadcast(WmEvent::WindowOpened {
-        id: window,
+        id: notify_id, // Send FRAME id so shell captures the frame!
         title,
         class,
         x,
@@ -401,6 +529,84 @@ fn manage_window(
     // Update EWMH
     update_client_list(conn, atoms, wm, screen.root)?;
 
+    Ok(())
+}
+
+fn toggle_maximize(
+    conn: &RustConnection,
+    atoms: &Atoms,
+    wm: &mut WindowManager,
+    _ipc: &mut IpcHandle,
+    window: u32,
+    _root: u32,
+) -> Result<()> {
+    let screen = &conn.setup().roots[0];
+    let win = wm.get_window_mut(window).context("Window not found")?;
+    
+    if win.maximized {
+        // Unmaximize: restore previous geometry
+        let target_x = win.restore_x;
+        let target_y = win.restore_y;
+        let target_w = win.restore_width;
+        let target_h = win.restore_height;
+        
+        if let Some(frame) = &win.frame {
+            frame.move_to(conn, target_x as i16, target_y as i16)?;
+            frame.resize(conn, target_w as u16, target_h as u16)?;
+        } else {
+            conn.configure_window(
+                window,
+                &ConfigureWindowAux::new()
+                    .x(target_x)
+                    .y(target_y)
+                    .width(target_w)
+                    .height(target_h),
+            )?;
+        }
+        
+        win.x = target_x;
+        win.y = target_y;
+        win.width = target_w;
+        win.height = target_h;
+        win.maximized = false;
+        
+        // Remove EWMH maximize state
+        atoms.set_window_state(conn, window, &[], &[atoms._net_wm_state_maximized_vert, atoms._net_wm_state_maximized_horz])?;
+    } else {
+        // Maximize: save current geometry and maximize
+        win.restore_x = win.x;
+        win.restore_y = win.y;
+        win.restore_width = win.width;
+        win.restore_height = win.height;
+        
+        let screen_w = screen.width_in_pixels as u32;
+        let screen_h = screen.height_in_pixels as u32;
+        
+        if let Some(frame) = &win.frame {
+            frame.move_to(conn, 0, 0)?;
+            frame.resize(conn, screen_w as u16, screen_h as u16)?;
+        } else {
+            conn.configure_window(
+                window,
+                &ConfigureWindowAux::new()
+                    .x(0)
+                    .y(0)
+                    .width(screen_w)
+                    .height(screen_h),
+            )?;
+        }
+        
+        win.x = 0;
+        win.y = 0;
+        win.width = screen_w;
+        win.height = screen_h;
+        win.maximized = true;
+        
+        // Set EWMH maximize state
+        atoms.set_window_state(conn, window, &[atoms._net_wm_state_maximized_vert, atoms._net_wm_state_maximized_horz], &[])?;
+    }
+    
+    conn.flush()?;
     Ok(())
 }
 

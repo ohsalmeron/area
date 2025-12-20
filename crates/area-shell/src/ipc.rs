@@ -65,8 +65,8 @@ impl IpcSender {
 fn process_ipc_events(
     receiver: Res<IpcReceiver>,
     mut state: ResMut<ShellState>,
-    mut window_events: EventWriter<WindowEvent>,
-    mut workspace_events: EventWriter<WorkspaceEvent>,
+    mut window_events: MessageWriter<WindowEvent>,
+    mut workspace_events: MessageWriter<WorkspaceEvent>,
 ) {
     // Process all available events
     while let Some(event) = receiver.try_recv() {
@@ -93,24 +93,24 @@ fn process_ipc_events(
                     workspace: state.current_workspace,
                 };
                 state.on_window_opened(window.clone());
-                window_events.send(WindowEvent::Opened(window));
+                window_events.write(WindowEvent::Opened(window));
             }
 
             WmEvent::WindowClosed { id } => {
                 state.on_window_closed(id);
-                window_events.send(WindowEvent::Closed(id));
+                window_events.write(WindowEvent::Closed(id));
             }
 
             WmEvent::WindowFocused { id } => {
                 state.on_window_focused(id);
-                window_events.send(WindowEvent::Focused(id));
+                window_events.write(WindowEvent::Focused(id));
             }
 
             WmEvent::WindowTitleChanged { id, title } => {
                 if let Some(win) = state.windows.get_mut(&id) {
                     win.title = title.clone();
                 }
-                window_events.send(WindowEvent::TitleChanged { id, title });
+                window_events.write(WindowEvent::TitleChanged { id, title });
             }
 
             WmEvent::WindowGeometryChanged {
@@ -126,7 +126,7 @@ fn process_ipc_events(
                     win.width = width;
                     win.height = height;
                 }
-                window_events.send(WindowEvent::GeometryChanged {
+                window_events.write(WindowEvent::GeometryChanged {
                     id,
                     x,
                     y,
@@ -135,9 +135,19 @@ fn process_ipc_events(
                 });
             }
 
+            WmEvent::WindowDragStarted { id } => {
+                state.dragging_windows.insert(id);
+                debug!("Window {} drag started", id);
+            }
+
+            WmEvent::WindowDragEnded { id } => {
+                state.dragging_windows.remove(&id);
+                debug!("Window {} drag ended", id);
+            }
+
             WmEvent::WorkspaceChanged { current, total } => {
                 state.on_workspace_changed(current, total);
-                workspace_events.send(WorkspaceEvent::Changed { current, total });
+                workspace_events.write(WorkspaceEvent::Changed { current, total });
             }
 
             WmEvent::SyncState {
@@ -172,16 +182,27 @@ fn process_ipc_events(
 
 /// Background IPC task
 async fn ipc_task(event_tx: Sender<WmEvent>, cmd_rx: Receiver<ShellCommand>) {
+    let mut retry_delay = 1u64;
+    const MAX_DELAY: u64 = 10;
+    
     loop {
         match connect_and_run(&event_tx, &cmd_rx).await {
             Ok(_) => {
                 info!("IPC connection closed, reconnecting...");
+                retry_delay = 1; // Reset delay on clean disconnect
             }
             Err(e) => {
-                warn!("IPC error: {}, retrying in 1s...", e);
+                // Only warn if it's not a "file not found" error (expected during startup)
+                if e.to_string().contains("No such file or directory") {
+                    debug!("IPC socket not found, retrying in {}s...", retry_delay);
+                } else {
+                    warn!("IPC error: {}, retrying in {}s...", e, retry_delay);
+                }
             }
         }
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay)).await;
+        // Exponential backoff, capped at MAX_DELAY
+        retry_delay = (retry_delay * 2).min(MAX_DELAY);
     }
 }
 

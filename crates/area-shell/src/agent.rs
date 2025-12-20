@@ -32,7 +32,7 @@ fn update_agent_overlay(
     // Only show in Normal mode and when a window is focused
     if *mode != ShellMode::Normal || state.focused.is_none() {
         for entity in query.iter() {
-            commands.entity(entity).despawn_recursive();
+            commands.entity(entity).despawn();
         }
         return;
     }
@@ -44,7 +44,7 @@ fn update_agent_overlay(
 
     // Clean up
     for entity in query.iter() {
-        commands.entity(entity).despawn_recursive();
+        commands.entity(entity).despawn();
     }
 
     let Some(focused) = state.focused_window() else {
@@ -54,21 +54,19 @@ fn update_agent_overlay(
     // Position the overlay near the focused window's top-right corner
     // For now, we'll just put it in a fixed but relevant spot (center-right)
     commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                right: Val::Px(24.0),
-                top: Val::Px(100.0),
-                width: Val::Px(200.0),
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::all(Val::Px(12.0)),
-                row_gap: Val::Px(8.0),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.1, 0.1, 0.15, 0.9)),
-            BorderRadius::all(Val::Px(12.0)),
-            AgentOverlay,
-        ))
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            right: Val::Px(24.0),
+            top: Val::Px(100.0),
+            width: Val::Px(200.0),
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::all(Val::Px(12.0)),
+            row_gap: Val::Px(8.0),
+            border_radius: BorderRadius::all(Val::Px(12.0)),
+            ..default()
+        })
+        .insert(BackgroundColor(Color::srgba(0.1, 0.1, 0.15, 0.9)))
+        .insert(AgentOverlay)
         .with_children(|parent| {
             // Header
             parent.spawn((
@@ -106,12 +104,12 @@ fn update_agent_overlay(
                             height: Val::Px(32.0),
                             justify_content: JustifyContent::Center,
                             align_items: AlignItems::Center,
+                            border_radius: BorderRadius::all(Val::Px(6.0)),
                             ..default()
                         },
                         BackgroundColor(Color::srgba(0.2, 0.2, 0.25, 0.8)),
-                        BorderRadius::all(Val::Px(6.0)),
-                        AgentAction(cmd.to_string()),
                     ))
+                    .insert(AgentAction(cmd.to_string()))
                     .with_children(|parent| {
                         parent.spawn((
                             Text::new(label),

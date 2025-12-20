@@ -19,8 +19,10 @@ impl Plugin for BarPlugin {
                     update_clock,
                     update_workspace_indicator,
                     update_window_title,
+                    update_taskbar,
                     handle_workspace_click,
                     handle_terminal_click,
+                    handle_taskbar_click,
                 ),
             );
     }
@@ -42,6 +44,14 @@ struct TerminalButton;
 #[derive(Component)]
 struct WindowTitleText;
 
+/// Marker for taskbar window buttons
+#[derive(Component)]
+struct TaskbarWindowButton(u32);
+
+/// Marker for the taskbar container
+#[derive(Component)]
+struct TaskbarContainer;
+
 /// Marker for the clock
 #[derive(Component)]
 struct ClockText;
@@ -59,19 +69,17 @@ fn setup_bar(mut commands: Commands) {
 
     // Bar background
     commands
-        .spawn((
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Px(32.0),
-                flex_direction: FlexDirection::Row,
-                justify_content: JustifyContent::SpaceBetween,
-                align_items: AlignItems::Center,
-                padding: UiRect::horizontal(Val::Px(8.0)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.1, 0.1, 0.15, 0.9)),
-            BarRoot,
-        ))
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            height: Val::Px(32.0),
+            flex_direction: FlexDirection::Row,
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Center,
+            padding: UiRect::horizontal(Val::Px(8.0)),
+            ..default()
+        })
+        .insert(BackgroundColor(Color::srgba(0.1, 0.1, 0.15, 0.9)))
+        .insert(BarRoot)
         .with_children(|parent| {
             // Left: Workspace switcher
             parent
@@ -89,6 +97,7 @@ fn setup_bar(mut commands: Commands) {
                                 height: Val::Px(24.0),
                                 justify_content: JustifyContent::Center,
                                 align_items: AlignItems::Center,
+                                border_radius: BorderRadius::all(Val::Px(4.0)),
                                 ..default()
                             },
                             BackgroundColor(if i == 0 {
@@ -96,9 +105,8 @@ fn setup_bar(mut commands: Commands) {
                             } else {
                                 Color::srgba(0.2, 0.2, 0.25, 0.8)
                             }),
-                            BorderRadius::all(Val::Px(4.0)),
-                            WorkspaceButton(i),
-                        )).with_children(|parent| {
+                        ))
+                        .insert(WorkspaceButton(i)).with_children(|parent| {
                             parent.spawn((
                                 Text::new(format!("{}", i + 1)),
                                 TextFont {
@@ -120,12 +128,12 @@ fn setup_bar(mut commands: Commands) {
                     justify_content: JustifyContent::Center,
                     align_items: AlignItems::Center,
                     margin: UiRect::left(Val::Px(8.0)),
+                    border_radius: BorderRadius::all(Val::Px(4.0)),
                     ..default()
                 },
                 BackgroundColor(Color::srgba(0.2, 0.3, 0.4, 0.9)),
-                BorderRadius::all(Val::Px(4.0)),
-                TerminalButton,
-            )).with_children(|parent| {
+            ))
+            .insert(TerminalButton).with_children(|parent| {
                 parent.spawn((
                     Text::new("▶"),
                     TextFont {
@@ -135,6 +143,16 @@ fn setup_bar(mut commands: Commands) {
                     TextColor(Color::WHITE),
                 ));
             });
+
+            // Taskbar: Window buttons
+            parent
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(4.0),
+                    margin: UiRect::left(Val::Px(8.0)),
+                    ..default()
+                })
+                .insert(TaskbarContainer);
 
             // Center: Active window title
             parent.spawn((
@@ -235,6 +253,113 @@ fn handle_terminal_click(
             ipc.send(area_ipc::ShellCommand::LaunchApp { 
                 command: "wezterm start --always-new-process".to_string() 
             });
+        }
+    }
+}
+
+/// Update taskbar with open windows
+fn update_taskbar(
+    mut commands: Commands,
+    state: Res<ShellState>,
+    taskbar_query: Query<Entity, With<TaskbarContainer>>,
+    window_buttons: Query<(Entity, &TaskbarWindowButton)>,
+    mut button_colors: Query<&mut BackgroundColor, With<TaskbarWindowButton>>,
+) {
+    if !state.is_changed() {
+        return;
+    }
+
+    // Get current window IDs from state
+    let current_windows: std::collections::HashSet<u32> = state.windows.keys().copied().collect();
+    
+    // Get existing button window IDs
+    let existing_windows: std::collections::HashSet<u32> = window_buttons
+        .iter()
+        .map(|(_, btn)| btn.0)
+        .collect();
+
+    // Remove buttons for closed windows
+    for (entity, btn) in window_buttons.iter() {
+        if !current_windows.contains(&btn.0) {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    // Add buttons for new windows
+    if let Ok(taskbar_entity) = taskbar_query.single() {
+        for window_id in current_windows.iter() {
+            if !existing_windows.contains(window_id) {
+                if let Some(window) = state.windows.get(window_id) {
+                    // Skip shell window
+                    if window.class == "area-shell" {
+                        continue;
+                    }
+                    
+                    let is_focused = state.focused == Some(*window_id);
+                    let title = if window.title.len() > 20 {
+                        format!("{}...", &window.title[..17])
+                    } else {
+                        window.title.clone()
+                    };
+
+                    commands.entity(taskbar_entity).with_children(|parent| {
+                        parent.spawn((
+                            Button,
+                            Node {
+                                min_width: Val::Px(100.0),
+                                max_width: Val::Px(200.0),
+                                height: Val::Px(24.0),
+                                padding: UiRect::horizontal(Val::Px(8.0)),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                border_radius: BorderRadius::all(Val::Px(4.0)),
+                                ..default()
+                            },
+                            BackgroundColor(if is_focused {
+                                Color::srgba(0.3, 0.5, 0.9, 0.8)
+                            } else {
+                                Color::srgba(0.2, 0.2, 0.25, 0.8)
+                            }),
+                        ))
+                        .insert(TaskbarWindowButton(*window_id))
+                        .with_children(|parent| {
+                            parent.spawn((
+                                Text::new(title),
+                                TextFont {
+                                    font_size: 12.0,
+                                    ..default()
+                                },
+                                TextColor(Color::WHITE),
+                            ));
+                        });
+                    });
+                }
+            }
+        }
+        
+        // Update existing button colors for focus changes
+        for (entity, btn) in window_buttons.iter() {
+            let is_focused = state.focused == Some(btn.0);
+            if let Ok(mut bg) = button_colors.get_mut(entity) {
+                *bg = BackgroundColor(if is_focused {
+                    Color::srgba(0.3, 0.5, 0.9, 0.8)
+                } else {
+                    Color::srgba(0.2, 0.2, 0.25, 0.8)
+                });
+            }
+        }
+    }
+}
+
+/// Handle clicking on taskbar window buttons
+fn handle_taskbar_click(
+    query: Query<(&Interaction, &TaskbarWindowButton), Changed<Interaction>>,
+    ipc: Res<IpcSender>,
+) {
+    for (interaction, button) in &query {
+        if *interaction == Interaction::Pressed {
+            debug!("Taskbar: focusing window {}", button.0);
+            ipc.send(area_ipc::ShellCommand::FocusWindow { id: button.0 });
         }
     }
 }

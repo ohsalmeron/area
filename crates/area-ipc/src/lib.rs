@@ -49,6 +49,12 @@ pub enum WmEvent {
         height: u32,
     },
 
+    /// A window drag started (user is dragging the window)
+    WindowDragStarted { id: u32 },
+
+    /// A window drag ended (user released the window)
+    WindowDragEnded { id: u32 },
+
     /// Workspace changed
     WorkspaceChanged { current: u8, total: u8 },
 
