@@ -6,7 +6,6 @@ members = [
     "crates/area-ipc",
     "crates/area-focus",
     "crates/area-panel",
-    "crates/area-navigator",
 ]
 
 [workspace.package]

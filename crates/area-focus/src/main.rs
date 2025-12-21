@@ -103,6 +103,31 @@ fn send_take_focus(conn: &RustConnection, window: u32) -> Result<()> {
     Ok(())
 }
 
+fn is_terminal_window(conn: &RustConnection, window: u32) -> bool {
+    // Check WM_CLASS for terminal applications
+    match conn.get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 256) {
+        Ok(cookie) => match cookie.reply() {
+            Ok(reply) => {
+                if let Ok(class) = String::from_utf8(reply.value) {
+                    let class_lower = class.to_lowercase();
+                    // Check for common terminal applications
+                    class_lower.contains("alacritty") || 
+                    class_lower.contains("xterm") ||
+                    class_lower.contains("urxvt") ||
+                    class_lower.contains("gnome-terminal") ||
+                    class_lower.contains("xfce4-terminal") ||
+                    class_lower.contains("konsole") ||
+                    class_lower.contains("kitty")
+                } else {
+                    false
+                }
+            }
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
 fn set_focus_to_window(conn: &RustConnection, window: u32) -> Result<()> {
     // Check if window accepts input
     let attrs = conn.get_window_attributes(window)?.reply()?;
@@ -1032,6 +1057,8 @@ fn main() -> Result<()> {
             x11rb::protocol::Event::MapNotify(e) => {
                 // Center windows when they're mapped
                 if e.event != root && !e.override_redirect {
+                    let is_terminal = is_terminal_window(&conn, e.event);
+                    
                     // Get window geometry
                     if let Ok(geom_reply) = conn.get_geometry(e.event) {
                         if let Ok(geom) = geom_reply.reply() {
@@ -1051,6 +1078,19 @@ fn main() -> Result<()> {
                             } else {
                                 let title = get_window_title(&conn, e.event);
                                 tracing::info!("✓ Centered window {} '{}' at ({}, {})", e.event, title, x, y);
+                            }
+                            
+                            // Focus app windows, but not terminal windows
+                            // Terminal windows stay in background, app windows come to foreground
+                            if !is_terminal {
+                                let window_id = e.event;
+                                if let Err(err) = set_focus_to_window(&conn, window_id) {
+                                    tracing::warn!("Failed to focus window {}: {}", window_id, err);
+                                } else {
+                                    tracing::info!("✓ Focused app window {} '{}'", window_id, get_window_title(&conn, window_id));
+                                }
+                            } else {
+                                tracing::debug!("Terminal window {} mapped, leaving in background", e.event);
                             }
                         }
                     }

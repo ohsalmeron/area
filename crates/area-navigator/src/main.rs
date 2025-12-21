@@ -8,14 +8,9 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-use std::time::Duration;
-use std::thread;
+use linicon;
 use xfce_rs_ui::styles;
 use xfce_rs_ui::colors;
-use x11rb::connection::Connection;
-use x11rb::protocol::xproto::*;
-use x11rb::rust_connection::RustConnection;
-use x11rb::CURRENT_TIME;
 
 pub fn main() -> iced::Result {
     iced::application(Navigator::new, Navigator::update, Navigator::view)
@@ -148,11 +143,22 @@ impl Navigator {
                     .replace("%u", "").replace("%U", "")
                     .trim().to_string();
                 
-                // Launch app in Alacritty terminal, then focus the app window
-                let exec_clone = cleaned.clone();
-                std::thread::spawn(move || {
-                    launch_app_in_terminal(&exec_clone);
-                });
+                // Execute through shell to handle complex commands, environment variables, and shell syntax
+                // Desktop entries often contain commands like "env VAR=value app" or shell constructs
+                let result = StdCommand::new("sh")
+                    .arg("-c")
+                    .arg(&cleaned)
+                    .spawn();
+                
+                match result {
+                    Ok(_) => {
+                        tracing::debug!("Successfully launched: {}", cleaned);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to launch '{}': {}", cleaned, e);
+                        // Could show a notification to the user here
+                    }
+                }
                 
                 // Hide window instead of exiting to keep app alive
                 window::latest().and_then(|id| window::minimize(id, true))
@@ -455,18 +461,26 @@ fn resolve_icon(icon_key: &str) -> Option<IconSource> {
         return path_to_icon_source(path);
     }
 
-    // 2. Try linicon (icon theme lookup) - TODO: fix API
-    // if let Ok(Some(found)) = linicon::lookup_icon(icon_key, 32, 1.0) {
-    //     return path_to_icon_source(&found.path);
-    // }
+    // 2. Try linicon (icon theme lookup)
+    if let Some(found) = linicon::lookup_icon(icon_key)
+        .with_size(32)
+        .next()
+        .and_then(|r| r.ok())
+    {
+        return path_to_icon_source(&found.path);
+    }
 
     // 3. Strip extension and try icon theme again (e.g., "app.png" -> "app")
-    // let name_without_ext = path.file_stem().and_then(|s| s.to_str()).unwrap_or(icon_key);
-    // if name_without_ext != icon_key {
-    //     if let Ok(Some(found)) = linicon::lookup_icon(name_without_ext, 32, 1.0) {
-    //         return path_to_icon_source(&found.path);
-    //     }
-    // }
+    let name_without_ext = path.file_stem().and_then(|s| s.to_str()).unwrap_or(icon_key);
+    if name_without_ext != icon_key {
+        if let Some(found) = linicon::lookup_icon(name_without_ext)
+            .with_size(32)
+            .next()
+            .and_then(|r| r.ok())
+        {
+            return path_to_icon_source(&found.path);
+        }
+    }
 
     // 4. Look in /usr/share/pixmaps
     for ext in &["svg", "png", "xpm"] {
@@ -506,217 +520,33 @@ fn scan_desktop_entries() -> Vec<AppEntry> {
     let locales: &[&str] = &["en_US", "en"];
 
     for entry_path in DesktopIter::new(search_paths.into_iter()) {
-        if let Ok(desktop) = DesktopEntry::from_path(&entry_path, Some(locales)) {
-            if desktop.no_display() {
-                continue;
+        if let Ok(bytes) = std::fs::read_to_string(&entry_path) {
+            if let Ok(desktop) = DesktopEntry::from_str(&entry_path, &bytes, Some(locales)) {
+                if desktop.no_display() || desktop.hidden() {
+                    continue;
+                }
+
+                let exec = match desktop.exec() {
+                    Some(e) => e.to_string(),
+                    None => continue,
+                };
+
+                let id = entry_path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                let name = desktop.name(locales)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| id.clone());
+                
+                let icon = desktop.icon().and_then(resolve_icon);
+
+                entries.push(AppEntry { name, exec, id, icon });
             }
-
-            let exec = match desktop.exec() {
-                Some(e) => e.to_string(),
-                None => continue,
-            };
-
-            let id = entry_path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string();
-
-            let name = desktop.name(locales)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| id.clone());
-            
-            let icon = desktop.icon().and_then(resolve_icon);
-
-            entries.push(AppEntry { name, exec, id, icon });
         }
     }
 
     entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     entries
-}
-
-/// Launch an application in Alacritty terminal, then focus the app window
-fn launch_app_in_terminal(command: &str) {
-    // Connect to X11
-    let (conn, screen_num) = match RustConnection::connect(None) {
-        Ok(conn) => conn,
-        Err(e) => {
-            tracing::error!("Failed to connect to X11: {}", e);
-            return;
-        }
-    };
-    
-    let root = conn.setup().roots[screen_num].root;
-    
-    // Get list of windows before launch
-    let windows_before = get_all_windows(&conn, root);
-    
-    // Launch in Alacritty with command (keep terminal open with 'read')
-    let alacritty_cmd = format!("{}; read -p 'Press Enter to close...'", command);
-    let result = StdCommand::new("alacritty")
-        .arg("-e")
-        .arg("sh")
-        .arg("-c")
-        .arg(&alacritty_cmd)
-        .spawn();
-    
-    match result {
-        Ok(_) => {
-            tracing::debug!("Launched '{}' in Alacritty", command);
-        }
-        Err(e) => {
-            tracing::error!("Failed to launch '{}' in Alacritty: {}", command, e);
-            return;
-        }
-    }
-    
-    // Wait a bit for windows to appear
-    thread::sleep(Duration::from_millis(500));
-    
-    // Get list of windows after launch
-    let windows_after = get_all_windows(&conn, root);
-    
-    // Find new windows that aren't Alacritty
-    let new_windows: Vec<u32> = windows_after
-        .iter()
-        .filter(|w| !windows_before.contains(w))
-        .filter(|w| !is_alacritty_window(&conn, **w))
-        .copied()
-        .collect();
-    
-    // Focus the first app window found
-    if let Some(app_window) = new_windows.first() {
-        tracing::info!("Found app window: {}, focusing it", app_window);
-        focus_app_window(&conn, *app_window, root);
-    } else {
-        tracing::warn!("No app window found after launch, trying to find any non-Alacritty window");
-        // Fallback: try to find any non-Alacritty window
-        for window in &windows_after {
-            if !is_alacritty_window(&conn, *window) && is_window_mapped(&conn, *window) {
-                tracing::info!("Focusing fallback window: {}", window);
-                focus_app_window(&conn, *window, root);
-                break;
-            }
-        }
-    }
-}
-
-/// Get all top-level windows
-fn get_all_windows(conn: &RustConnection, root: u32) -> Vec<u32> {
-    let mut windows = Vec::new();
-    
-    if let Ok(tree) = conn.query_tree(root) {
-        if let Ok(reply) = tree.reply() {
-            for &child in reply.children.iter() {
-                // Check if it's a top-level window (not a child of another window)
-                if let Ok(attrs) = conn.get_window_attributes(child) {
-                    if let Ok(attrs) = attrs.reply() {
-                        // Only include mapped windows
-                        if attrs.map_state == MapState::VIEWABLE {
-                            windows.push(child);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    windows
-}
-
-/// Check if a window is an Alacritty terminal window
-fn is_alacritty_window(conn: &RustConnection, window: u32) -> bool {
-    // Check WM_CLASS
-    if let Ok(wm_class) = conn.get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 256) {
-        if let Ok(reply) = wm_class.reply() {
-            if let Ok(class_str) = String::from_utf8(reply.value) {
-                if class_str.to_lowercase().contains("alacritty") {
-                    return true;
-                }
-            }
-        }
-    }
-    
-    // Check _NET_WM_NAME or WM_NAME
-    let name = get_window_name(conn, window);
-    if name.to_lowercase().contains("alacritty") {
-        return true;
-    }
-    
-    false
-}
-
-/// Get window name
-fn get_window_name(conn: &RustConnection, window: u32) -> String {
-    // Try _NET_WM_NAME first
-    if let Ok(net_wm_name) = conn.intern_atom(false, b"_NET_WM_NAME") {
-        if let Ok(atom) = net_wm_name.reply() {
-            if let Ok(utf8_string) = conn.intern_atom(false, b"UTF8_STRING") {
-                if let Ok(utf8_atom) = utf8_string.reply() {
-                    if let Ok(prop) = conn.get_property(false, window, atom.atom, utf8_atom.atom, 0, 256) {
-                        if let Ok(reply) = prop.reply() {
-                            if let Ok(name) = String::from_utf8(reply.value) {
-                                if !name.is_empty() {
-                                    return name;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // Fallback to WM_NAME
-    if let Ok(wm_name) = conn.get_property(false, window, AtomEnum::WM_NAME, AtomEnum::STRING, 0, 256) {
-        if let Ok(reply) = wm_name.reply() {
-            if let Ok(name) = String::from_utf8(reply.value) {
-                return name;
-            }
-        }
-    }
-    
-    format!("Window {}", window)
-}
-
-/// Check if window is mapped
-fn is_window_mapped(conn: &RustConnection, window: u32) -> bool {
-    if let Ok(attrs) = conn.get_window_attributes(window) {
-        if let Ok(attrs) = attrs.reply() {
-            return attrs.map_state == MapState::VIEWABLE;
-        }
-    }
-    false
-}
-
-/// Focus an application window
-fn focus_app_window(conn: &RustConnection, window: u32, root: u32) {
-    // Raise the window
-    if let Err(e) = conn.configure_window(window, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE)) {
-        tracing::warn!("Failed to raise window {}: {}", window, e);
-        return;
-    }
-    let _ = conn.flush();
-    
-    // Set input focus
-    if let Err(e) = conn.set_input_focus(InputFocus::POINTER_ROOT, window, CURRENT_TIME) {
-        tracing::warn!("Failed to set input focus to window {}: {}", window, e);
-    }
-    let _ = conn.flush();
-    
-    // Update _NET_ACTIVE_WINDOW
-    if let Ok(net_active_window) = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW") {
-        if let Ok(atom) = net_active_window.reply() {
-            let event = ClientMessageEvent::new(
-                32,
-                root,
-                atom.atom,
-                [2, CURRENT_TIME, 0, 0, 0], // source = 2 (application)
-            );
-            let _ = conn.send_event(false, root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, &event);
-            let _ = conn.flush();
-        }
-    }
-    
-    tracing::info!("✓ Focused app window {}", window);
 }

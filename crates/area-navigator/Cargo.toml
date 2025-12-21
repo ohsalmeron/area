@@ -1,41 +1,36 @@
 [package]
-name = "area-navigator"
+name = "navigator"
 version = "0.1.0"
 edition = "2021"
-authors = ["Area Desktop Contributors"]
-description = "Area Navigator - Application launcher for Area Desktop"
+authors = ["XFCE.rs Contributors"]
+description = "Navigator for XFCE.rs desktop environment"
 license = "GPL-2.0-or-later"
-keywords = ["area", "app-finder", "launcher", "search"]
+repository = "https://github.com/your-username/xfce-rs"
+keywords = ["xfce", "app-finder", "launcher", "search"]
 categories = ["gui"]
 
 [dependencies]
-iced = "0.14"
-tokio = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tracing = "0.1"
-thiserror = "1.0"
-anyhow = "1"
-fuzzy-matcher = "0.3"
-regex = "1"
-xdg = "2.5"
-freedesktop-desktop-entry = "0.7"
-walkdir = "2"
-dirs = "5"
-linicon = "2.3"
+iced = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+fuzzy-matcher = { workspace = true }
+regex = { workspace = true }
+xdg = { workspace = true }
+freedesktop-desktop-entry = { workspace = true }
+walkdir = { workspace = true }
+dirs = { workspace = true }
+linicon = { workspace = true }
 rusqlite = "0.31"
 chrono = "0.4"
-x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
 
-# xfce-rs dependencies - using direct paths
-xfce-rs-config = { path = "../../xfce-rs/crates/xfce-rs-config", package = "xfce-rs-config" }
-xfce-rs-utils = { path = "../../xfce-rs/crates/xfce-rs-utils", package = "xfce-rs-utils" }
-xfce-rs-ui = { path = "../../xfce-rs/crates/xfce-rs-ui", package = "xfce-rs-ui" }
-xfce-rs-menu = { path = "../../xfce-rs/crates/xfce-rs-menu", package = "xfce-rs-menu" }
+xfce-rs-config = { path = "../xfce-rs-config" }
+xfce-rs-utils = { path = "../xfce-rs-utils" }
+xfce-rs-ui = { path = "../xfce-rs-ui" }
+xfce-rs-menu = { path = "../xfce-rs-menu" }
 
 [dev-dependencies]
 tempfile = "3.8"
-
-[[bin]]
-name = "area-navigator"
-path = "src/main.rs"
