@@ -73,7 +73,7 @@ pub async fn run() -> Result<()> {
     let mut wm = WindowManager::new();
 
     // Initialize Composite extension (redirects all windows to offscreen)
-    // This enables efficient window capture in the shell
+    // This enables efficient window capture in the compositor
     let _composite_manager = crate::composite::CompositeManager::new(&conn, root)?;
 
     // Start IPC server
@@ -183,7 +183,7 @@ pub async fn run() -> Result<()> {
                                 start_y: e.root_y,
                                 mode: DragMode::Move,
                             });
-                            // Notify shell that drag started
+                            // Notify compositor that drag started
                             ipc.broadcast(WmEvent::WindowDragStarted { id: e.child });
                             handled = true;
                         } else if e.detail == 3 {
@@ -194,7 +194,7 @@ pub async fn run() -> Result<()> {
                                 start_y: e.root_y,
                                 mode: DragMode::Resize,
                             });
-                            // Notify shell that drag started (resize also triggers wobble)
+                            // Notify compositor that drag started (resize also triggers wobble)
                             ipc.broadcast(WmEvent::WindowDragStarted { id: e.child });
                             handled = true;
                         }
@@ -229,7 +229,7 @@ pub async fn run() -> Result<()> {
                                     start_y: e.root_y,
                                     mode: DragMode::Move,
                                 });
-                                // Notify shell that drag started
+                                // Notify compositor that drag started
                                 ipc.broadcast(WmEvent::WindowDragStarted { id: win_id });
                                 handled = true;
                              } else if kind == "button" && e.detail == 1 {
@@ -241,9 +241,9 @@ pub async fn run() -> Result<()> {
                                              // Send delete message
                                              atoms.send_delete_window(&conn, win_id)?;
                                          }
-                                        ButtonType::Maximize => {
+                                         ButtonType::Maximize => {
                                             toggle_maximize(&conn, &atoms, &mut wm, &mut ipc, win_id, screen.root)?;
-                                        }
+                                         }
                                          ButtonType::Minimize => {
                                              // Minimize (Unmap)
                                              conn.unmap_window(if let Some(w) = wm.get_window(win_id) {
@@ -286,7 +286,7 @@ pub async fn run() -> Result<()> {
 
                 Event::ButtonRelease(_) => {
                     if let Some(drag) = drag_state.take() {
-                        // Notify shell that drag ended
+                        // Notify compositor that drag ended
                         ipc.broadcast(WmEvent::WindowDragEnded { id: drag.window });
                         conn.ungrab_pointer(x11rb::CURRENT_TIME)?;
                     }
@@ -305,32 +305,32 @@ pub async fn run() -> Result<()> {
                                 continue;
                             };
                             
-                            match drag.mode {
-                                DragMode::Move => {
+                                match drag.mode {
+                                    DragMode::Move => {
                                     let new_x = old_x + dx as i32;
                                     let new_y = old_y + dy as i32;
-                                    
+                                        
                                     // Get frame reference before mutable borrow
                                     let has_frame = wm.get_window(drag.window).and_then(|w| w.frame.as_ref()).is_some();
                                     
                                     if has_frame {
                                         if let Some(win) = wm.get_window(drag.window) {
-                                            if let Some(frame) = &win.frame {
+                                        if let Some(frame) = &win.frame {
                                                 frame.move_to(&conn, new_x as i16, new_y as i16)?;
                                             }
                                         }
-                                    } else {
-                                        conn.configure_window(
-                                            drag.window,
-                                            &ConfigureWindowAux::new().x(new_x).y(new_y),
-                                        )?;
-                                    }
+                                        } else {
+                                            conn.configure_window(
+                                                drag.window,
+                                                &ConfigureWindowAux::new().x(new_x).y(new_y),
+                                            )?;
+                                        }
 
-                                    if let Some(win) = wm.get_window_mut(drag.window) {
-                                        win.x = new_x;
-                                        win.y = new_y;
-                                    }
-                                    
+                                        if let Some(win) = wm.get_window_mut(drag.window) {
+                                            win.x = new_x;
+                                            win.y = new_y;
+                                        }
+                                        
                                     // Send geometry update for smooth compositor updates during drag
                                     ipc.broadcast(WmEvent::WindowGeometryChanged {
                                         id: drag.window,
@@ -339,31 +339,31 @@ pub async fn run() -> Result<()> {
                                         width: old_width,
                                         height: old_height,
                                     });
-                                }
-                                DragMode::Resize => {
+                                    }
+                                    DragMode::Resize => {
                                     let new_w = (old_width as i32 + dx as i32).max(100) as u32;
                                     let new_h = (old_height as i32 + dy as i32).max(100) as u32;
-                                    
+                                        
                                     // Get frame reference before mutable borrow
                                     let has_frame = wm.get_window(drag.window).and_then(|w| w.frame.as_ref()).is_some();
                                     
                                     if has_frame {
                                         if let Some(win) = wm.get_window(drag.window) {
-                                            if let Some(frame) = &win.frame {
+                                        if let Some(frame) = &win.frame {
                                                 frame.resize(&conn, new_w as u16, new_h as u16)?;
                                             }
                                         }
-                                    } else {
-                                        conn.configure_window(
-                                            drag.window,
-                                            &ConfigureWindowAux::new().width(new_w).height(new_h),
-                                        )?;
-                                    }
+                                        } else {
+                                            conn.configure_window(
+                                                drag.window,
+                                                &ConfigureWindowAux::new().width(new_w).height(new_h),
+                                            )?;
+                                        }
 
-                                    if let Some(win) = wm.get_window_mut(drag.window) {
-                                        win.width = new_w;
-                                        win.height = new_h;
-                                    }
+                                        if let Some(win) = wm.get_window_mut(drag.window) {
+                                            win.width = new_w;
+                                            win.height = new_h;
+                                        }
                                     
                                     // Send geometry update for smooth compositor updates during resize
                                     ipc.broadcast(WmEvent::WindowGeometryChanged {
@@ -435,8 +435,8 @@ fn manage_window(
 
     debug!("Managing window {}: '{}' ({})", window, title, class);
 
-    // Center the window on screen (unless it's the shell)
-    let (x, y, width, height) = if class == "area-shell" {
+    // Center the window on screen (unless it's the compositor)
+    let (x, y, width, height) = if class == "area-comp" {
         (geom.x as i32, geom.y as i32, geom.width as u32, geom.height as u32)
     } else {
         // Clamp window size to screen size to prevent overflow
@@ -447,15 +447,15 @@ fn manage_window(
         (x, y, width, height)
     };
 
-    // Create frame if not shell
-    let (_final_x, _final_y, _final_w, _final_h, frame) = if class != "area-shell" {
+    // Create frame if not compositor
+    let (_final_x, _final_y, _final_w, _final_h, frame) = if class != "area-comp" {
         let frame = WindowFrame::new(conn, screen, window, x as i16, y as i16, width as u16, height as u16)?;
         
         // When framed, the window ID we track is still the client, 
         // but its x/y should be the frame's x/y
         (x, y, width, height, Some(frame))
     } else {
-        // Just map shell directly
+        // Just map compositor directly
         conn.configure_window(
             window,
             &ConfigureWindowAux::new()
@@ -505,7 +505,7 @@ fn manage_window(
     win.height = height;
     win.title = title.clone();
     win.class = class.clone();
-    win.sticky = class == "area-shell";
+    win.sticky = class == "area-comp";
     win.mapped = true;
     win.workspace = wm.current_workspace();
     win.frame = frame.clone(); // Store frame info
@@ -515,7 +515,7 @@ fn manage_window(
 
     wm.add_window(win);
 
-    // Notify shell
+    // Notify compositor
     ipc.broadcast(WmEvent::WindowOpened {
         id: notify_id, // Send FRAME id so shell captures the frame!
         title,
@@ -630,7 +630,7 @@ fn focus_window(
     // Update EWMH
     atoms.update_active_window(conn, root, Some(window))?;
 
-    // Notify shell
+    // Notify compositor
     ipc.broadcast(WmEvent::WindowFocused { id: window });
 
     Ok(())
@@ -787,7 +787,7 @@ fn switch_workspace(
     // Update EWMH
     atoms.update_current_desktop(conn, root, workspace as u32)?;
 
-    // Notify shell
+    // Notify compositor
     ipc.broadcast(WmEvent::WorkspaceChanged {
         current: workspace,
         total: wm.num_workspaces(),

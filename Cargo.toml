@@ -2,9 +2,11 @@
 resolver = "2"
 members = [
     "crates/area-wm",
-    "crates/area-shell", 
+    "crates/area-comp",
     "crates/area-ipc",
-    "crates/area-terminal",
+    "crates/area-focus",
+    "crates/area-panel",
+    "crates/area-navigator",
 ]
 
 [workspace.package]
@@ -25,7 +27,7 @@ anyhow = "1"
 dirs = "5"
 
 # X11 (for area-wm)
-x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr", "composite", "render", "shape", "xfixes"] }
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr", "composite", "render", "shape", "xfixes", "damage", "dri3", "present"] }
 
 # IPC
 area-ipc = { path = "crates/area-ipc" }

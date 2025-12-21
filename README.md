@@ -67,11 +67,65 @@ cd area
 
 # Build all crates
 cargo build --release
+```
 
-# Install (optional)
+## Installation
+
+### LightDM Session (Recommended)
+
+The easiest way to set up Area as a desktop session is using the installation script:
+
+```bash
+# User installation (installs to ~/.local)
+./scripts/install-session.sh
+
+# System-wide installation (requires sudo)
+sudo ./scripts/install-session.sh
+```
+
+The script will:
+- Build release binaries (`area-wm`, `area-shell`)
+- Build and install `navigator` (app launcher) if `xfce-rs` is available
+- Install systemd user service files
+- Install LightDM session file
+- Set up proper permissions
+
+**After installation:**
+1. Log out from your current session
+2. Select "Area" from the LightDM session menu
+3. Log in
+
+**Viewing logs:**
+```bash
+# Window manager logs
+journalctl --user -u area-wm
+
+# Shell logs
+journalctl --user -u area-shell
+
+# Follow logs in real-time
+journalctl --user -u area-wm -f
+```
+
+### Manual Installation
+
+If you prefer to install manually:
+
+```bash
+# Build binaries
+cargo build --release
+
+# Install binaries
 sudo install -Dm755 target/release/area-wm /usr/local/bin/
 sudo install -Dm755 target/release/area-shell /usr/local/bin/
 sudo install -Dm755 session/area-session /usr/local/bin/
+
+# Install systemd services (user)
+mkdir -p ~/.config/systemd/user
+cp session/*.service session/*.target ~/.config/systemd/user/
+systemctl --user daemon-reload
+
+# Install LightDM session
 sudo install -Dm644 session/area.desktop /usr/share/xsessions/
 ```
 
@@ -88,9 +142,9 @@ DISPLAY=:1 cargo run --bin area-shell
 
 ### As your session
 
-1. Install the session files (see above)
+1. Install using the script (see above)
 2. Log out
-3. Select "Area" from your display manager (GDM, SDDM, etc.)
+3. Select "Area" from LightDM
 4. Log in
 
 ## Keybindings

@@ -1,4 +1,4 @@
-//! IPC server for communicating with area-shell
+//! IPC server for communicating with area-comp (compositor)
 
 use anyhow::Result;
 use area_ipc::{socket_path, FramedMessage, ShellCommand, WmEvent};
@@ -7,11 +7,11 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 
-/// IPC server that broadcasts events to connected shells
+/// IPC server that broadcasts events to connected compositors
 pub struct IpcServer {
     /// Sender for broadcasting events to all connected clients
     event_tx: broadcast::Sender<WmEvent>,
-    /// Receiver for commands from shells
+    /// Receiver for commands from compositors
     command_rx: mpsc::Receiver<ShellCommand>,
     /// Sender for commands (cloned into client handlers)
     command_tx: mpsc::Sender<ShellCommand>,
@@ -65,7 +65,7 @@ impl IpcServer {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
-                        info!("Shell connected");
+                        info!("Compositor connected");
                         let event_rx = event_tx.subscribe();
                         let cmd_tx = command_tx.clone();
                         tokio::spawn(handle_client(stream, event_rx, cmd_tx));
@@ -91,7 +91,7 @@ pub struct IpcHandle {
 }
 
 impl IpcHandle {
-    /// Broadcast an event to all connected shells
+    /// Broadcast an event to all connected compositors
     pub fn broadcast(&self, event: WmEvent) {
         // Ignore error if no receivers
         let _ = self.event_tx.send(event);
@@ -111,7 +111,7 @@ async fn handle_client(
 ) {
     let (mut reader, mut writer) = stream.into_split();
 
-    // Spawn reader task (shell → WM)
+    // Spawn reader task (compositor → WM)
     let cmd_tx = command_tx.clone();
     let reader_task = tokio::spawn(async move {
         let mut len_buf = [0u8; 4];
@@ -149,7 +149,7 @@ async fn handle_client(
         debug!("Reader task ended");
     });
 
-    // Writer task (WM → shell)
+    // Writer task (WM → compositor)
     let writer_task = tokio::spawn(async move {
         loop {
             match event_rx.recv().await {
@@ -181,5 +181,5 @@ async fn handle_client(
         _ = writer_task => {}
     }
 
-    info!("Shell disconnected");
+    info!("Compositor disconnected");
 }

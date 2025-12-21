@@ -1,0 +1,22 @@
+[package]
+name = "area-focus"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+x11rb = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+
+
+
+
+
+
+
+
+
+
+

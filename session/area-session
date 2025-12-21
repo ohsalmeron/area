@@ -1,53 +1,65 @@
 #!/bin/bash
 # Area Desktop Session
-# Starts the WM daemon and Bevy shell
+# Activates systemd user services for area-wm and area-comp
 
 set -e
 
-# Export runtime dir
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-
-# Log file
-LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/area"
-mkdir -p "$LOG_DIR"
-
-echo "Starting Area Desktop..." > "$LOG_DIR/session.log"
-
-# Start the window manager
-area-wm >> "$LOG_DIR/wm.log" 2>&1 &
-WM_PID=$!
-echo "Started area-wm (PID: $WM_PID)" >> "$LOG_DIR/session.log"
-
-# Wait for IPC socket to appear
-SOCKET_PATH="$XDG_RUNTIME_DIR/area-wm.sock"
-TIMEOUT=10
-while [ ! -S "$SOCKET_PATH" ] && [ $TIMEOUT -gt 0 ]; do
-    sleep 0.1
-    TIMEOUT=$((TIMEOUT - 1))
+# Robustness: Reset failed units from previous session
+# This prevents failed units from breaking the new session startup
+for unit in $(systemctl --user --no-legend --state=failed --plain list-units | cut -f1 -d' '); do
+    partof="$(systemctl --user show -p PartOf --value "$unit")"
+    for target in area-desktop.target graphical-session.target; do
+        if [ "$partof" = "$target" ]; then
+            systemctl --user reset-failed "$unit"
+            break
+        fi
+    done
 done
 
-if [ ! -S "$SOCKET_PATH" ]; then
-    echo "ERROR: WM socket not found after timeout" >> "$LOG_DIR/session.log"
-    kill $WM_PID 2>/dev/null
+# Source /etc/profile for system-wide environment variables
+# This ensures important system-wide settings are available
+if [ -f /etc/profile ]; then
+    source /etc/profile
+fi
+
+# Export runtime dir (should already be set by LightDM, but ensure it exists)
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export XDG_CURRENT_DESKTOP=Area
+export XDG_SESSION_TYPE=x11
+
+# Ensure DISPLAY is set (LightDM should set this, but ensure it's exported)
+if [ -z "$DISPLAY" ]; then
+    echo "Error: DISPLAY environment variable is not set" >&2
+    exit 1
+fi
+export DISPLAY
+
+# Save environment variables that will be added to systemd
+# This allows us to clean them up later
+new_env=$(systemctl --user show-environment | cut -d'=' -f 1 | sort | comm -13 - <(env | cut -d'=' -f 1 | sort))
+
+# Import environment variables from the login manager
+systemctl --user import-environment
+
+# Ensure systemd user services directory exists
+SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+mkdir -p "$SYSTEMD_USER_DIR"
+
+# Copy service files if they don't exist or are outdated
+# (Install script should handle this, but ensure they're present)
+if [ ! -f "$SYSTEMD_USER_DIR/area-wm.service" ]; then
+    echo "Warning: area-wm.service not found. Run install script first." >&2
     exit 1
 fi
 
-echo "WM socket ready" >> "$LOG_DIR/session.log"
+# Reload systemd user daemon to pick up any new service files
+systemctl --user daemon-reload
 
-# Start the shell
-area-shell >> "$LOG_DIR/shell.log" 2>&1 &
-SHELL_PID=$!
-echo "Started area-shell (PID: $SHELL_PID)" >> "$LOG_DIR/session.log"
+# Enable and start the desktop target
+# Use --wait to block until the service is ready (replaces sleep + manual checks)
+systemctl --user enable area-desktop.target
+systemctl --wait --user start area-desktop.target
 
-# Handle termination
-cleanup() {
-    echo "Shutting down Area..." >> "$LOG_DIR/session.log"
-    kill $SHELL_PID 2>/dev/null
-    kill $WM_PID 2>/dev/null
-    exit 0
-}
-trap cleanup SIGTERM SIGINT
-
-# Wait for WM to exit (it's the session leader)
-wait $WM_PID
-cleanup
+# Cleanup: Unset environment variables that we added
+# This prevents them from persisting after session ends
+systemctl --user unset-environment $new_env

@@ -1,0 +1,76 @@
+#!/bin/bash
+# Area Navigator Session - Optimized fast startup
+# Launches area-focus, area-panel, and Navigator in parallel
+
+# Log to file for debugging (non-blocking)
+LOG_FILE="${XDG_RUNTIME_DIR:-/tmp}/area-session.log"
+exec 1> >(tee -a "$LOG_FILE" > /dev/null 2>&1)
+exec 2> >(tee -a "$LOG_FILE" > /dev/null 2>&1)
+
+# Source system profile
+[ -f /etc/profile ] && source /etc/profile
+
+# Export required environment variables
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export XDG_CURRENT_DESKTOP=Area
+export XDG_SESSION_TYPE=x11
+
+# Ensure DISPLAY is set
+[ -z "$DISPLAY" ] && { echo "Error: DISPLAY not set" >&2; exit 1; }
+export DISPLAY
+
+# Add binaries to PATH (fast lookup)
+[ -d "$HOME/.local/bin" ] && export PATH="$HOME/.local/bin:$PATH"
+[ -d "/usr/local/bin" ] && export PATH="/usr/local/bin:$PATH"
+
+# Find binaries (fast lookup, no building)
+AREA_FOCUS=""
+if command -v area-focus >/dev/null 2>&1; then
+    AREA_FOCUS="$(command -v area-focus)"
+elif [ -f "$HOME/.local/bin/area-focus" ]; then
+    AREA_FOCUS="$HOME/.local/bin/area-focus"
+elif [ -f "/usr/local/bin/area-focus" ]; then
+    AREA_FOCUS="/usr/local/bin/area-focus"
+fi
+
+AREA_PANEL=""
+if command -v area-panel >/dev/null 2>&1; then
+    AREA_PANEL="$(command -v area-panel)"
+elif [ -f "$HOME/.local/bin/area-panel" ]; then
+    AREA_PANEL="$HOME/.local/bin/area-panel"
+elif [ -f "/usr/local/bin/area-panel" ]; then
+    AREA_PANEL="/usr/local/bin/area-panel"
+fi
+
+NAVIGATOR=""
+if command -v navigator >/dev/null 2>&1; then
+    NAVIGATOR="$(command -v navigator)"
+elif [ -f "$HOME/.local/bin/navigator" ]; then
+    NAVIGATOR="$HOME/.local/bin/navigator"
+elif [ -f "/usr/local/bin/navigator" ]; then
+    NAVIGATOR="/usr/local/bin/navigator"
+fi
+
+# Launch services in parallel (fast startup)
+if [ -n "$AREA_FOCUS" ] && [ -x "$AREA_FOCUS" ]; then
+    export RUST_LOG="${RUST_LOG:-info}"
+    "$AREA_FOCUS" > "${XDG_RUNTIME_DIR:-/tmp}/area-focus.log" 2>&1 &
+    FOCUS_PID=$!
+    trap "kill $FOCUS_PID 2>/dev/null" EXIT
+fi
+
+if [ -n "$AREA_PANEL" ] && [ -x "$AREA_PANEL" ]; then
+    "$AREA_PANEL" > "${XDG_RUNTIME_DIR:-/tmp}/area-panel.log" 2>&1 &
+    PANEL_PID=$!
+    trap "kill $PANEL_PID 2>/dev/null" EXIT
+fi
+
+# Launch Navigator (staged after services, but immediately)
+if [ -n "$NAVIGATOR" ] && [ -x "$NAVIGATOR" ]; then
+    exec "$NAVIGATOR"
+else
+    echo "Error: Navigator not found" >&2
+    exit 1
+fi
+
+

@@ -3,6 +3,8 @@
 //! Shared message types for communication between `area-wm` (X11 window manager)
 //! and `area-shell` (Bevy UI shell).
 
+
+pub mod compositor_proto;
 use serde::{Deserialize, Serialize};
 
 /// Socket path for IPC communication

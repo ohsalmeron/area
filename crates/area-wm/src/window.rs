@@ -24,6 +24,10 @@ pub struct Window {
     pub restore_y: i32,
     pub restore_width: u32,
     pub restore_height: u32,
+    #[allow(dead_code)] // Reserved for future DRI3/damage tracking
+    pub damage: Option<u32>,
+    #[allow(dead_code)] // Reserved for future DRI3/damage tracking
+    pub pixmap: Option<u32>,
 }
 
 impl Window {
@@ -45,6 +49,8 @@ impl Window {
             restore_y: 0,
             restore_width: 640,
             restore_height: 480,
+            damage: None,
+            pixmap: None,
         }
     }
 }

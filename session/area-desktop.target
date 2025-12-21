@@ -1,0 +1,16 @@
+[Unit]
+Description=Area Desktop Environment
+Documentation=https://github.com/ohsalmeron/area
+After=graphical-session-pre.target
+Wants=area-wm.service area-comp.service
+
+[Install]
+WantedBy=default.target
+
+
+
+
+
+
+
+
