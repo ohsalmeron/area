@@ -2,6 +2,7 @@
 
 mod capture;
 mod dri3;
+mod fps;
 mod gl_context;
 mod ipc;
 mod renderer;
@@ -20,7 +21,7 @@ use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::composite::{self, ConnectionExt as CompositeExt};
 use std::time::{Duration, Instant};
 use std::path::PathBuf;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 struct CompositorApp {
@@ -35,6 +36,8 @@ struct CompositorApp {
     screen_num: usize,
     root: u32,
     cursor_manager: Option<CursorManager>,
+    fps_counter: fps::FpsCounter,
+    dirty: bool,  // True if we need to render
 }
 
 impl CompositorApp {
@@ -104,6 +107,8 @@ impl CompositorApp {
             screen_num: 0,
             root: overlay_window, // Use COW as the main 'root' for rendering
             cursor_manager,
+            fps_counter: fps::FpsCounter::new(),
+            dirty: true,  // Start dirty to render initial frame
         })
     }
 
@@ -331,21 +336,54 @@ impl CompositorApp {
         }
     }
 
-    fn tick(&mut self) {
-        // Process IPC events
+    fn tick(&mut self) -> bool {
+        let mut had_events = false;
+        
+        // Process IPC events from WM
         while let Some(event) = self.ipc.try_recv_event() {
             self.handle_wm_event(event);
+            self.dirty = true;
+            had_events = true;
         }
 
-        // Render frame
-        self.render_frame();
-
-        // Throttle to ~60fps
-        let elapsed = self.last_frame.elapsed();
-        if elapsed < Duration::from_millis(16) {
-            std::thread::sleep(Duration::from_millis(16) - elapsed);
+        // Process X11 damage events
+        if let Err(e) = self.capture.process_damage_events() {
+            if let Some(x11_err) = e.downcast_ref::<x11rb::errors::ConnectionError>() {
+                error!("X11 connection broken: {}", x11_err);
+                return false; // Stop processing
+            } else {
+                warn!("Error processing damage events: {}", e);
+            }
         }
-        self.last_frame = Instant::now();
+        
+        // Check if any windows are damaged
+        let window_ids = self.window_state.window_ids();
+        for id in window_ids {
+            if self.capture.is_damaged(id) {
+                self.dirty = true;
+                had_events = true;
+                break;
+            }
+        }
+
+        // Only render if dirty and we have a valid context
+        if self.dirty {
+            // Adaptive VSync: Wait for next vertical blank
+            // Note: Disabled because glXWaitVideoSyncSGI blocks too long on Xephyr (1-4 FPS)
+            // if let Some(ctx) = self.gl_context.as_ref() {
+            //     let _ = ctx.wait_video_sync();
+            // }
+
+            self.render_frame();
+            self.dirty = false;
+            
+            // Update FPS counter
+            if let Some(fps) = self.fps_counter.tick() {
+                info!("FPS: {:.0}", fps);
+            }
+        }
+        
+        had_events
     }
 }
 
@@ -354,15 +392,42 @@ impl CompositorApp {
         // Initialize GL
         self.init_gl()?;
 
-        // Main compositor loop
+        // Get the X11 connection file descriptor for polling
+        use std::os::unix::io::AsRawFd;
+        let fd = self.capture.connection().stream().as_raw_fd();
+
+        info!("Event-driven compositor loop starting");
+
+        // Main compositor loop - event driven!
         loop {
+            // First, process any pending events without blocking
             self.tick();
             
-            // Sleep to throttle to ~60fps
-            std::thread::sleep(Duration::from_millis(16));
+            // Use poll() with 16ms timeout to wake for both X11 and IPC events
+            // This still gives nearly 0% CPU when idle (sleeping 16ms at a time)
+            // while ensuring IPC events are processed promptly
+            let mut poll_fds = [nix::poll::PollFd::new(
+                unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) },
+                nix::poll::PollFlags::POLLIN,
+            )];
+            
+            // 16ms timeout (~60 checks per second when idle is acceptable)
+            match nix::poll::poll(&mut poll_fds, nix::poll::PollTimeout::from(16u16)) {
+                Ok(_) => {
+                    // X11 has data or timeout, loop will process events
+                }
+                Err(nix::errno::Errno::EINTR) => {
+                    // Interrupted by signal, continue
+                }
+                Err(e) => {
+                    warn!("poll() error: {}", e);
+                }
+            }
         }
     }
 }
+
+
 
 #[tokio::main]
 async fn main() -> Result<()> {

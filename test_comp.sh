@@ -38,7 +38,10 @@ COMP_PID=$!
 sleep 2
 # Start Client
 sleep 2
-echo "🔢 Launching gnome-calculator..."
-gnome-calculator &
+# echo "🔢 Launching gnome-calculator..."
+# gnome-calculator &
+
+echo "⚙️ Launching glxgears (FPS Stress Test - Should lock to VSync)..."
+LIBGL_ALWAYS_SOFTWARE=1 glxgears &
 
 wait

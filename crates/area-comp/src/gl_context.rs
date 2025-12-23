@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use x11rb::rust_connection::RustConnection;
 use std::ffi::CString;
 use std::ptr;
-use tracing::info;
+use tracing::{info, warn};
 use x11_dl::glx::{self, Glx};
 use x11_dl::xlib::{self, Xlib};
 
@@ -40,6 +40,10 @@ pub struct GlContext {
     glXBindTexImageEXT: unsafe extern "C" fn(*mut xlib::Display, u32, i32, *mut i32),
     #[allow(non_snake_case)]
     glXReleaseTexImageEXT: unsafe extern "C" fn(*mut xlib::Display, u32, i32, *mut i32),
+    #[allow(non_snake_case)]
+    glXSwapIntervalEXT: Option<unsafe extern "C" fn(*mut xlib::Display, u32, i32)>,
+    #[allow(non_snake_case)]
+    glXWaitVideoSyncSGI: Option<unsafe extern "C" fn(i32, i32, *mut i32) -> i32>,
     
     // Composite overlay
     pub overlay_window: u64,
@@ -215,6 +219,14 @@ impl GlContext {
             let sym = CString::new("glXReleaseTexImageEXT").unwrap();
              (glx.glXGetProcAddress)(sym.as_ptr() as *const _)
         };
+        let swap_interval = unsafe {
+            let sym = CString::new("glXSwapIntervalEXT").unwrap();
+             (glx.glXGetProcAddress)(sym.as_ptr() as *const _)
+        };
+        let wait_video_sync = unsafe {
+            let sym = CString::new("glXWaitVideoSyncSGI").unwrap();
+             (glx.glXGetProcAddress)(sym.as_ptr() as *const _)
+        };
 
         if bind_tex.is_none() || release_tex.is_none() {
             unsafe {
@@ -233,6 +245,30 @@ impl GlContext {
 
         let bind_fn = unsafe { std::mem::transmute(bind_tex) };
         let release_fn = unsafe { std::mem::transmute(release_tex) };
+        let swap_fn: Option<unsafe extern "C" fn(*mut xlib::Display, u32, i32)> = unsafe { 
+            if let Some(ptr) = swap_interval {
+                Some(std::mem::transmute(ptr))
+            } else {
+                None
+            }
+        };
+        let wait_sync_fn = unsafe { 
+            if let Some(ptr) = wait_video_sync {
+                Some(std::mem::transmute(ptr))
+            } else {
+                None
+            }
+        };
+
+        // Enable VSync (Swap Interval 1)
+        if let Some(swap_func) = swap_fn {
+            unsafe {
+                info!("Enabling VSync (glXSwapIntervalEXT)");
+                (swap_func)(display, root, 1);
+            }
+        } else {
+            warn!("glXSwapIntervalEXT not supported - VSync may be disabled");
+        }
 
         Ok(Self {
             glx,
@@ -245,6 +281,8 @@ impl GlContext {
             config,
             glXBindTexImageEXT: bind_fn,
             glXReleaseTexImageEXT: release_fn,
+            glXSwapIntervalEXT: swap_fn,
+            glXWaitVideoSyncSGI: wait_sync_fn,
             overlay_window: root as u64, // Just store it for now
         })
     }
@@ -266,6 +304,22 @@ impl GlContext {
             return Err(anyhow::anyhow!("glXMakeCurrent failed"));
         }
         Ok(())
+    }
+
+    /// Wait for Vertical Blank (VSync) using SGI_video_sync
+    pub fn wait_video_sync(&self) -> Result<()> {
+        if let Some(wait_fn) = self.glXWaitVideoSyncSGI {
+            let mut count = 0;
+            unsafe {
+                // Wait for vertical retrace.
+                // arguments: (divisor, remainder, count)
+                // divisor=1, remainder=0 means "wait for next retrace"
+                (wait_fn)(1, 0, &mut count);
+            }
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("glXWaitVideoSyncSGI not supported"))
+        }
     }
 
 

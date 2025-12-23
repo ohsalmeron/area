@@ -148,6 +148,10 @@ impl WindowCapture {
             use x11rb::protocol::Event;
             if let Event::DamageNotify(e) = event {
                 self.damaged_windows.insert(e.drawable);
+                
+                // CRITICAL: We must subtract the damage to continue receiving events!
+                // Passing None for parts means we subtract (clear) all damage from the damage object.
+                let _ = self.conn.damage_subtract(e.damage, x11rb::NONE, x11rb::NONE);
             }
         }
         Ok(())
