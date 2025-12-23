@@ -16,6 +16,7 @@ const GLX_TEXTURE_FORMAT_EXT: i32 = 0x20D5;
 const GLX_TEXTURE_TARGET_EXT: i32 = 0x20D6;
 const GLX_TEXTURE_2D_EXT: i32 = 0x20DC; // Fixed: was 0x20DB
 const GLX_TEXTURE_FORMAT_RGBA_EXT: i32 = 0x20DA; // Fixed: was 0x20D6
+const GLX_TEXTURE_FORMAT_RGB_EXT: i32 = 0x20D9; // Added constant
 const GLX_FRONT_LEFT_EXT: i32 = 0x20DE;
 const GLX_MIPMAP_TEXTURE_EXT: i32 = 0x20D7;
 
@@ -26,7 +27,9 @@ pub struct GlContext {
     pub xlib: Xlib,
     pub display: *mut xlib::Display,
     pub context: glx::GLXContext,
-    pub drawable: u32, // Root window (drawable)
+    pub drawable: u32, // Overlay window
+    #[allow(dead_code)]
+    pub root: u32,
     #[allow(dead_code)]
     pub screen_num: i32,
     
@@ -37,6 +40,9 @@ pub struct GlContext {
     glXBindTexImageEXT: unsafe extern "C" fn(*mut xlib::Display, u32, i32, *mut i32),
     #[allow(non_snake_case)]
     glXReleaseTexImageEXT: unsafe extern "C" fn(*mut xlib::Display, u32, i32, *mut i32),
+    
+    // Composite overlay
+    pub overlay_window: u64,
 }
 
 impl GlContext {
@@ -58,6 +64,30 @@ impl GlContext {
         }
 
         let screen_num_i32 = screen_num as i32;
+
+        // Get Composite Overlay Window (COW)
+        // We need to load XComposite extension function manually or rely on Xlib if linked.
+        // Since we use x11-dl for Xlib, we need to check if it includes XComposite or if we need to dlsym it.
+        // x11-dl's Xlib struct includes some extensions but maybe not Composite.
+        // Let's assume we can dlsym it from libXcomposite.so or libX11 if integrated.
+        // Actually, let's try to map the root first.
+        
+        // BETTER APPROACH for now to avoid linking hell:
+        // Just use the root window but fix the visual.
+        // BUT user says pitch black. If we render to Root, and Subwindows are redirected (Manual),
+        // we should see the Root content.
+        
+        // WAIT. If we are in Manual Redirect mode (set by WM), the Composite Overlay Window is vital.
+        // Without it, rendering to Root might be obscured by the overlay if it exists/is auto-created?
+        // No, if we don't ask for it, it might not exist.
+        
+        // Let's try to fix the Visual Depth Mismatch on the Root Window first.
+        // If Root is 24-bit, we MUST use a 24-bit FBConfig for the context attached to Root.
+        
+        // ...
+        
+        // Let's implement the 24-bit fallback for the MAIN context first.
+        // This is safer than introducing COW complexity and potential linking issues right now.
 
         // Verify GLX version
         let mut major = 0;
@@ -210,10 +240,12 @@ impl GlContext {
             display,
             context,
             drawable: root,
+            root, // In main.rs we pass COW here effectively
             screen_num: screen_num_i32,
             config,
             glXBindTexImageEXT: bind_fn,
             glXReleaseTexImageEXT: release_fn,
+            overlay_window: root as u64, // Just store it for now
         })
     }
 
@@ -297,8 +329,14 @@ impl GlContext {
                 Ok::<glx::GLXFBConfig, anyhow::Error>(self.config)
             })?;
         
+        let texture_format = if depth == 32 {
+            GLX_TEXTURE_FORMAT_RGBA_EXT
+        } else {
+            GLX_TEXTURE_FORMAT_RGB_EXT
+        };
+
         let attribs = [
-            GLX_TEXTURE_FORMAT_EXT, GLX_TEXTURE_FORMAT_RGBA_EXT,
+            GLX_TEXTURE_FORMAT_EXT, texture_format,
             GLX_TEXTURE_TARGET_EXT, GLX_TEXTURE_2D_EXT,
             GLX_MIPMAP_TEXTURE_EXT, 0,
             0
@@ -325,6 +363,9 @@ impl GlContext {
     /// Bind a GLX pixmap to the current texture unit
     pub fn bind_tex_image(&self, glx_pixmap: u32) {
         unsafe {
+            // CRITICAL: Wait for X server to finish rendering before GL reads the pixmap
+            // This synchronizes the X11 and GLX rendering pipelines
+            (self.glx.glXWaitX)();
             (self.glXBindTexImageEXT)(self.display, glx_pixmap, GLX_FRONT_LEFT_EXT, ptr::null_mut());
         }
     }

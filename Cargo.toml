@@ -6,6 +6,7 @@ members = [
     "crates/area-ipc",
     "crates/area-focus",
     "crates/area-panel",
+    "crates/area-navigator",
 ]
 
 [workspace.package]
@@ -24,6 +25,18 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 dirs = "5"
+chrono = "0.4"
+rusqlite = "0.31"
+
+# GUI & Desktop
+iced = { version = "0.12", features = ["svg", "image", "tokio"] }
+freedesktop-desktop-entry = "0.6"
+fuzzy-matcher = "0.3"
+regex = "1"
+xdg = "2"
+walkdir = "2"
+linicon = "2" # Icon lookup
+thiserror = "1"
 
 # X11 (for area-wm)
 x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr", "composite", "render", "shape", "xfixes", "damage", "dri3", "present"] }

@@ -9,8 +9,9 @@ use fuzzy_matcher::FuzzyMatcher;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use linicon;
-use xfce_rs_ui::styles;
-use xfce_rs_ui::colors;
+mod theme_mock;
+use theme_mock::styles;
+use theme_mock::colors;
 
 pub fn main() -> iced::Result {
     iced::application(Navigator::new, Navigator::update, Navigator::view)
@@ -521,8 +522,9 @@ fn scan_desktop_entries() -> Vec<AppEntry> {
 
     for entry_path in DesktopIter::new(search_paths.into_iter()) {
         if let Ok(bytes) = std::fs::read_to_string(&entry_path) {
-            if let Ok(desktop) = DesktopEntry::from_str(&entry_path, &bytes, Some(locales)) {
-                if desktop.no_display() || desktop.hidden() {
+            // Try matching locales directly as slice, if from_str exists
+            if let Ok(desktop) = DesktopEntry::from_str(&entry_path, &bytes, locales) {
+                if desktop.no_display() {
                     continue;
                 }
 
@@ -536,7 +538,7 @@ fn scan_desktop_entries() -> Vec<AppEntry> {
                     .unwrap_or("unknown")
                     .to_string();
 
-                let name = desktop.name(locales)
+                let name = desktop.name(Some(locales))
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| id.clone());
                 

@@ -6,11 +6,13 @@ mod gl_context;
 mod ipc;
 mod renderer;
 mod window_state;
+mod cursor;
 
 use anyhow::{Context, Result};
 use area_ipc::WmEvent;
 use capture::WindowCapture;
 use gl_context::GlContext;
+use cursor::CursorManager;
 use ipc::IpcClient;
 use renderer::Renderer;
 use window_state::WindowState;
@@ -32,6 +34,7 @@ struct CompositorApp {
     last_frame: Instant,
     screen_num: usize,
     root: u32,
+    cursor_manager: Option<CursorManager>,
 }
 
 impl CompositorApp {
@@ -69,6 +72,26 @@ impl CompositorApp {
         let ipc = IpcClient::connect().await
             .context("Failed to connect to WM via IPC")?;
 
+        // Get Composite Overlay Window (COW) for rendering
+        // We must render to this window to be visible over redirected subwindows
+        let overlay_window = conn.composite_get_overlay_window(root)?.reply()?.overlay_win;
+        info!("Using Composite Overlay Window: {}", overlay_window);
+
+        // Initialize Cursor Manager
+        // Be careful: we want to listen for cursor events on the REAL root window, not the overlay.
+        // `root` variable holds the real root window (passed to composite_get_overlay_window).
+        // Let's use THAT root for cursor events.
+        let cursor_manager = match CursorManager::new(conn, root) {
+            Ok(cm) => {
+                info!("Hardware cursor emulation initialized");
+                Some(cm)
+            },
+            Err(e) => {
+                warn!("Failed to initialize hardware cursor emulation: {}", e);
+                None
+            }
+        };
+
         Ok(Self {
             capture,
             ipc,
@@ -79,7 +102,8 @@ impl CompositorApp {
             gl_context: None,
             renderer: None,
             screen_num: 0,
-            root,
+            root: overlay_window, // Use COW as the main 'root' for rendering
+            cursor_manager,
         })
     }
 
@@ -219,8 +243,8 @@ impl CompositorApp {
             }
         }
 
-        // Clear screen (bright red for debugging - change to dark gray later)
-        renderer.clear(0.8, 0.2, 0.2, 1.0);
+        // Clear screen (dark gray background)
+        renderer.clear(0.1, 0.1, 0.1, 1.0);
 
         // 2. Render windows
         for win in self.window_state.windows_in_order() {
@@ -230,25 +254,77 @@ impl CompositorApp {
             }
 
             // Mark damage as processed (we are drawing the current state)
+            // Handle damage (re-bind texture if needed)
             if self.capture.is_damaged(win.id) {
                 self.capture.clear_damage(win.id);
+                // For valid TFP updates, we might need to re-bind or re-create the GLX pixmap
+                // especially if the underlying storage changed (resize) or if synchronization is needed.
+                // Simple approach: re-capture the pixmap.
+                if let Some((pixmap, depth)) = self.capture.capture_window_pixmap(win.id) {
+                     match renderer.update_window_pixmap(gl_ctx, win.id, pixmap, depth) {
+                         Ok(maybe_old) => {
+                             if let Some(old) = maybe_old {
+                                 self.capture.free_pixmap(old);
+                             }
+                             // trace!("Updated texture for damaged window {}", win.id);
+                         },
+                         Err(e) => {
+                             warn!("Failed to update damaged window texture {}: {}", win.id, e);
+                             self.capture.free_pixmap(pixmap);
+                         }
+                     }
+                }
             }
 
             // Render window
             let opacity = if win.focused { 1.0 } else { 0.9 };
-            debug!("Rendering window {} at ({}, {}) size {}x{}", win.id, win.x, win.y, win.width, win.height);
+            // trace!("Rendering window {} at ({}, {}) size {}x{}", win.id, win.x, win.y, win.width, win.height);
             renderer.render_window(
+                gl_ctx,
                 win.id,
                 win.x as f32,
                 win.y as f32,
                 win.width as f32,
                 win.height as f32,
-                self.screen_width,
-                self.screen_height,
+                self.screen_width as f32,
+                self.screen_height as f32,
                 opacity,
             );
         }
 
+        // 3. Render Cursor (Software emulation)
+        if let Some(cursor) = &mut self.cursor_manager {
+            // Update cursor state
+            let _ = cursor.update(self.capture.connection());
+            
+            if cursor.visible {
+                // Update texture if dirty
+                if cursor.dirty && !cursor.pixels.is_empty() {
+                    let tex_id = renderer.update_cursor_texture(
+                        cursor.width,
+                        cursor.height,
+                        &cursor.pixels
+                    );
+                    cursor.texture_id = Some(tex_id);
+                    cursor.dirty = false;
+                }
+                
+                if let Some(tex_id) = cursor.texture_id {
+                    // Render cursor ON TOP of everything
+                    renderer.render_cursor(
+                        tex_id,
+                        cursor.x,
+                        cursor.y,
+                        cursor.width,
+                        cursor.height,
+                        cursor.xhot,
+                        cursor.yhot,
+                        self.screen_width as f32,
+                        self.screen_height as f32,
+                    );
+                }
+            }
+        }
         // Swap buffers
         if let Err(e) = gl_ctx.swap_buffers() {
             warn!("Failed to swap buffers: {}", e);

@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use std::ffi::CString;
 use std::ptr;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Texture resources for a window
 struct WindowTexture {
@@ -232,25 +232,22 @@ impl Renderer {
         }
     }
 
-    /// Render a window
+    /// Render a window with per-frame texture binding (like Compiz's strictBinding mode)
     pub fn render_window(
         &self,
+        ctx: &crate::gl_context::GlContext,
         window_id: u32,
         x: f32,
         y: f32,
         width: f32,
         height: f32,
-        screen_width: u32,
-        screen_height: u32,
+        screen_width: f32,
+        screen_height: f32,
         opacity: f32,
     ) {
-        let texture = match self.textures.get(&window_id) {
-            Some(t) => {
-                debug!("Rendering window {} with texture ID {}", window_id, t.texture);
-                t.texture
-            },
+        let win_tex = match self.textures.get(&window_id) {
+            Some(t) => t,
             None => {
-                debug!("No texture for window {} yet, skipping render", window_id);
                 return; // No texture yet
             }
         };
@@ -275,16 +272,17 @@ impl Renderer {
             gl::Uniform1f(opacity_loc, opacity);
             gl::Uniform1i(tex_loc, 0);
 
-            // Bind texture
+            // Bind texture with per-frame TFP binding (strictBinding mode)
             gl::ActiveTexture(gl::TEXTURE0);
-            gl::BindTexture(gl::TEXTURE_2D, texture);
+            gl::BindTexture(gl::TEXTURE_2D, win_tex.texture);
+            
+            // CRITICAL: Bind the pixmap image EVERY FRAME (like Compiz strictBinding)
+            // This ensures we get the latest content from the X server
+            ctx.bind_tex_image(win_tex.glx_pixmap);
 
             // Render quad
             gl::BindVertexArray(self.vao);
             
-            // Quad vertices: position + texcoord
-            // Note: GLX TFP texture coordinates might be inverted compared to Image?
-            // Usually valid.
             let vertices: [f32; 16] = [
                 // Position      TexCoord
                 0.0, 0.0,        0.0, 1.0, // Bottom-left
@@ -292,15 +290,109 @@ impl Renderer {
                 1.0, 1.0,        1.0, 0.0, // Top-right
                 0.0, 1.0,        0.0, 0.0, // Top-left
             ];
+
+            gl::BindBuffer(gl::ARRAY_BUFFER, self.vbo);
+            gl::BufferData(
+                gl::ARRAY_BUFFER,
+                (vertices.len() * std::mem::size_of::<f32>()) as isize,
+                vertices.as_ptr() as *const _,
+                gl::DYNAMIC_DRAW,
+            );
+
+            gl::DrawArrays(gl::TRIANGLE_FAN, 0, 4);
             
-            // Wait, standard GL coordinates have (0,0) at bottom-left.
-            // X11 Image (0,0) is top-left.
-            // If TFP binds directly, the texture orientation depends on implementation.
-            // Usually we need to flip Y.
-            // My vertex coords above:
-            // BL(0,0) -> Eq to X11 BL?
-            // If Textures are top-down (Stream), then 0,0 is top-left.
-            // Let's stick to existing coords for now.
+            // CRITICAL: Release the pixmap image AFTER drawing (like Compiz strictBinding)
+            ctx.release_tex_image(win_tex.glx_pixmap);
+            
+            gl::BindVertexArray(0);
+            gl::BindTexture(gl::TEXTURE_2D, 0);
+            
+            // Check for OpenGL errors
+            let err = gl::GetError();
+            if err != gl::NO_ERROR {
+                warn!("OpenGL error after rendering window {}: 0x{:x}", window_id, err);
+            }
+        }
+    }
+
+    /// Update cursor texture
+    pub fn update_cursor_texture(&mut self, width: u16, height: u16, pixels: &[u32]) -> u32 {
+        let mut texture_id = 0;
+        unsafe {
+            gl::GenTextures(1, &mut texture_id);
+            gl::BindTexture(gl::TEXTURE_2D, texture_id);
+            
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+
+            // X11 cursor data is BGRA (little endian ARGB), OpenGL expects RGBA usually.
+            // XFixesGetCursorImage returns 32-bit ARGB/BGRA data (unsigned long).
+            // Let's assume standard BGRA format for now.
+            gl::TexImage2D(
+                gl::TEXTURE_2D,
+                0,
+                gl::RGBA as i32,
+                width as i32,
+                height as i32,
+                0,
+                gl::BGRA,
+                gl::UNSIGNED_BYTE,
+                pixels.as_ptr() as *const _,
+            );
+        }
+        texture_id
+    }
+
+    /// Render cursor
+    pub fn render_cursor(
+        &self,
+        texture_id: u32,
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+        xhot: u16,
+        yhot: u16,
+        screen_width: f32,
+        screen_height: f32,
+    ) {
+        unsafe {
+            gl::UseProgram(self.program);
+
+            // Calculate position (top-left of cursor image minus hotspot)
+            let draw_x = x as f32 - xhot as f32;
+            let draw_y = y as f32 - yhot as f32;
+
+            let x_gl = (draw_x / screen_width) * 2.0 - 1.0;
+            let y_gl = 1.0 - ((draw_y + height as f32) / screen_height) * 2.0;
+            let width_gl = (width as f32 / screen_width) * 2.0;
+            let height_gl = (height as f32 / screen_height) * 2.0;
+
+            let pos_loc = gl::GetUniformLocation(self.program, b"uPosition\0".as_ptr() as *const _);
+            let size_loc = gl::GetUniformLocation(self.program, b"uSize\0".as_ptr() as *const _);
+            let opacity_loc = gl::GetUniformLocation(self.program, b"uOpacity\0".as_ptr() as *const _);
+            let tex_loc = gl::GetUniformLocation(self.program, b"uTexture\0".as_ptr() as *const _);
+
+            gl::Uniform2f(pos_loc, x_gl, y_gl);
+            gl::Uniform2f(size_loc, width_gl, height_gl);
+            gl::Uniform1f(opacity_loc, 1.0);
+            gl::Uniform1i(tex_loc, 0);
+
+            gl::ActiveTexture(gl::TEXTURE0);
+            gl::BindTexture(gl::TEXTURE_2D, texture_id);
+
+            // Use the same VBO/VAO as windows (standard quad)
+            gl::BindVertexArray(self.vao);
+            
+            // Standard quad vertices
+            let vertices: [f32; 16] = [
+                0.0, 0.0, 0.0, 1.0,
+                1.0, 0.0, 1.0, 1.0,
+                1.0, 1.0, 1.0, 0.0,
+                0.0, 1.0, 0.0, 0.0, 
+            ];
 
             gl::BindBuffer(gl::ARRAY_BUFFER, self.vbo);
             gl::BufferData(
@@ -312,15 +404,6 @@ impl Renderer {
 
             gl::DrawArrays(gl::TRIANGLE_FAN, 0, 4);
             gl::BindVertexArray(0);
-            
-            // Check for OpenGL errors
-            let err = gl::GetError();
-            if err != gl::NO_ERROR {
-                warn!("OpenGL error after rendering window {}: 0x{:x}", window_id, err);
-            }
-            
-            debug!("Drew quad for window {} at GL coords ({}, {}) size {}x{}", 
-                   window_id, x_gl, y_gl, width_gl, height_gl);
         }
     }
 
