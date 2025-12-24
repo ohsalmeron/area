@@ -1,8 +1,9 @@
 #!/bin/bash
 # Area Desktop Session
-# Activates systemd user services for area-wm and area-comp
+# Activates systemd user service for unified area WM+Compositor
 
-set -e
+# Don't exit on errors - we want the session to keep running
+set +e
 
 # Robustness: Reset failed units from previous session
 # This prevents failed units from breaking the new session startup
@@ -29,10 +30,11 @@ export XDG_SESSION_TYPE=x11
 
 # Ensure DISPLAY is set (LightDM should set this, but ensure it's exported)
 if [ -z "$DISPLAY" ]; then
-    echo "Error: DISPLAY environment variable is not set" >&2
-    exit 1
+    echo "Warning: DISPLAY not set, defaulting to :0" >&2
+    export DISPLAY=:0
+else
+    export DISPLAY
 fi
-export DISPLAY
 
 # Save environment variables that will be added to systemd
 # This allows us to clean them up later
@@ -45,10 +47,9 @@ systemctl --user import-environment
 SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 mkdir -p "$SYSTEMD_USER_DIR"
 
-# Copy service files if they don't exist or are outdated
-# (Install script should handle this, but ensure they're present)
-if [ ! -f "$SYSTEMD_USER_DIR/area-wm.service" ]; then
-    echo "Warning: area-wm.service not found. Run install script first." >&2
+# Check if area.service exists
+if [ ! -f "$SYSTEMD_USER_DIR/area.service" ]; then
+    echo "Error: area.service not found. Run install script first." >&2
     exit 1
 fi
 
@@ -56,9 +57,111 @@ fi
 systemctl --user daemon-reload
 
 # Enable and start the desktop target
-# Use --wait to block until the service is ready (replaces sleep + manual checks)
+# Use --wait to block until the service is ready
 systemctl --user enable area-desktop.target
 systemctl --wait --user start area-desktop.target
+
+# Ensure DISPLAY is set for all child processes
+export DISPLAY="${DISPLAY:-:0}"
+
+# Wait for Area WM+Compositor to be fully initialized before launching apps
+echo "Waiting for Area WM+Compositor to initialize..."
+
+# First, wait for service to be active (with timeout)
+MAX_WAIT_SERVICE=10  # Max seconds to wait for service to start
+for i in $(seq 1 $((MAX_WAIT_SERVICE * 5))); do  # Check every 200ms
+    if systemctl --user is-active --quiet area.service; then
+        echo "Area service is active"
+        break
+    fi
+    sleep 0.2
+    if [ $i -eq $((MAX_WAIT_SERVICE * 5)) ]; then
+        echo "Warning: area.service did not become active within ${MAX_WAIT_SERVICE}s" >&2
+    fi
+done
+
+# Now wait for area to be fully initialized (GLX context, compositor, WM ready)
+# We check for "Starting main event loop" log message which signals readiness
+if systemctl --user is-active --quiet area.service; then
+    echo "Waiting for Area WM+Compositor to be fully ready..."
+    MAX_WAIT_READY=15  # Max seconds to wait for readiness
+    ready=false
+    
+    for i in $(seq 1 $((MAX_WAIT_READY * 5))); do  # Check every 200ms
+        # Check journal logs for "Starting main event loop" message
+        if journalctl --user -u area.service --since "2 seconds ago" --no-pager 2>/dev/null | grep -q "Starting main event loop"; then
+            echo "Area WM+Compositor is ready!"
+            ready=true
+            break
+        fi
+        sleep 0.2
+    done
+    
+    if [ "$ready" = false ]; then
+        echo "Warning: Area did not signal readiness, but proceeding anyway..." >&2
+    fi
+    
+    # Small additional delay to ensure everything is settled
+    sleep 0.3
+fi
+
+# Launch area-focus for keyboard input and focus management
+echo "Launching area-focus..."
+if command -v area-focus >/dev/null 2>&1; then
+    DISPLAY="$DISPLAY" area-focus > "${XDG_RUNTIME_DIR:-/tmp}/area-focus.log" 2>&1 &
+    echo "area-focus started (PID: $!)"
+elif [ -f "$HOME/.local/bin/area-focus" ]; then
+    DISPLAY="$DISPLAY" "$HOME/.local/bin/area-focus" > "${XDG_RUNTIME_DIR:-/tmp}/area-focus.log" 2>&1 &
+    echo "area-focus started (PID: $!)"
+fi
+
+sleep 1
+
+# Launch cosmic-term by default (primary terminal)
+echo "Launching cosmic-term..."
+if command -v cosmic-term >/dev/null 2>&1; then
+    DISPLAY="$DISPLAY" cosmic-term >/dev/null 2>&1 &
+    echo "cosmic-term started (PID: $!)"
+elif [ -f "$HOME/.local/bin/cosmic-term" ]; then
+    DISPLAY="$DISPLAY" "$HOME/.local/bin/cosmic-term" >/dev/null 2>&1 &
+    echo "cosmic-term started (PID: $!)"
+else
+    echo "Warning: cosmic-term not found, trying fallback terminals..." >&2
+    # Fallback to other terminals if cosmic-term not available
+    if command -v alacritty >/dev/null 2>&1; then
+        DISPLAY="$DISPLAY" alacritty &
+    elif command -v xterm >/dev/null 2>&1; then
+        DISPLAY="$DISPLAY" xterm &
+    elif command -v xfce4-terminal >/dev/null 2>&1; then
+        DISPLAY="$DISPLAY" xfce4-terminal &
+    fi
+fi
+
+sleep 1
+
+# Launch navigator by default (application launcher)
+echo "Launching navigator..."
+if command -v navigator >/dev/null 2>&1; then
+    DISPLAY="$DISPLAY" navigator >/dev/null 2>&1 &
+    echo "navigator started (PID: $!)"
+elif [ -f "$HOME/.local/bin/navigator" ]; then
+    DISPLAY="$DISPLAY" "$HOME/.local/bin/navigator" >/dev/null 2>&1 &
+    echo "navigator started (PID: $!)"
+else
+    echo "Warning: navigator not found" >&2
+fi
+
+sleep 1
+
+echo "Area desktop session started. Applications launched."
+
+# Keep the session running - wait for area-desktop.target to stop
+# This prevents the session from exiting immediately
+while systemctl --user is-active --quiet area-desktop.target; do
+    sleep 1
+done
+
+echo "Area desktop session ending..."
 
 # Cleanup: Unset environment variables that we added
 # This prevents them from persisting after session ends

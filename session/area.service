@@ -1,0 +1,33 @@
+[Unit]
+Description=Area Window Manager + Compositor (Unified)
+Documentation=https://github.com/ohsalmeron/area
+After=graphical-session-pre.target
+PartOf=area-desktop.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/area
+Restart=on-failure
+RestartSec=2
+StartLimitInterval=60
+StartLimitBurst=10
+StandardOutput=journal
+StandardError=journal
+
+# Wait for X server socket to be ready (check for X0, default display)
+ExecStartPre=/bin/bash -c 'for i in {1..50}; do [ -S /tmp/.X11-unix/X0 ] && exit 0; sleep 0.2; done; exit 1'
+
+# Environment (DISPLAY should be set by LightDM, but default to :0)
+Environment=DISPLAY=:0
+Environment=XDG_CURRENT_DESKTOP=Area
+Environment=XDG_SESSION_TYPE=x11
+
+# Cleanup environment on stop
+ExecStopPost=/usr/bin/systemctl --user unset-environment DISPLAY
+
+# Security
+NoNewPrivileges=true
+# Note: PrivateTmp disabled - WM/compositor needs access to X11 socket and system tmp
+
+[Install]
+WantedBy=area-desktop.target

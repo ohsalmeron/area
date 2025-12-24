@@ -1,13 +1,8 @@
 [workspace]
 resolver = "2"
-members = [
-    "crates/area-wm",
-    "crates/area-comp",
-    "crates/area-ipc",
-    "crates/area-focus",
-    "crates/area-panel",
-    "crates/area-navigator",
-]
+members = []
+# Default to building the unified binary
+default-members = ["."]
 
 [workspace.package]
 version = "0.1.0"
@@ -41,5 +36,43 @@ thiserror = "1"
 # X11 (for area-wm)
 x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr", "composite", "render", "shape", "xfixes", "damage", "dri3", "present"] }
 
-# IPC
-area-ipc = { path = "crates/area-ipc" }
+# ============================================================================
+# Main Binary: area (unified WM + Compositor)
+# ============================================================================
+
+[package]
+name = "area"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "area"
+path = "src/main.rs"
+
+[dependencies]
+# X11
+x11rb = { workspace = true }
+x11-dl = "2.21"
+
+# OpenGL
+gl = "0.14"
+
+# Async runtime
+tokio = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Serialization (for config)
+serde = { workspace = true }
+toml = "0.8"
+
+# Utilities
+dirs = { workspace = true }
