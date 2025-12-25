@@ -293,9 +293,13 @@ impl WindowManager {
         debug!("WM: Managing window {}", client.id);
         
         // Get window attributes
-        let attrs = conn.get_window_attributes(client.id)?
-            .reply()
-            .context("Failed to get window attributes")?;
+        let attrs = match conn.get_window_attributes(client.id)?.reply() {
+            Ok(attrs) => attrs,
+            Err(e) => {
+                debug!("WM: Failed to get attributes for window {}, it probably disappeared: {}", client.id, e);
+                return Ok(());
+            }
+        };
         
         if attrs.override_redirect {
             debug!("Window {} is override-redirect, skipping", client.id);
@@ -303,9 +307,13 @@ impl WindowManager {
         }
         
         // Get window geometry
-        let geom = conn.get_geometry(client.id)?
-            .reply()
-            .context("Failed to get window geometry")?;
+        let geom = match conn.get_geometry(client.id)?.reply() {
+            Ok(geom) => geom,
+            Err(e) => {
+                debug!("WM: Failed to get geometry for window {}, it probably disappeared: {}", client.id, e);
+                return Ok(());
+            }
+        };
         
         // Get window's preferred size from WM_NORMAL_HINTS if available
         let mut width = geom.width as u32;

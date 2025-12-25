@@ -168,14 +168,9 @@ impl Compositor {
         // In new architecture, CWindow.id IS the composite target.
         let composite_id = window.id;
         
-        // Redirect window for compositing (required before pixmap operations)
-        if let Err(e) = conn.composite_redirect_window(composite_id, composite::Redirect::MANUAL) {
-            warn!("Failed to redirect window {}: {}. Window will not be composited.", composite_id, e);
-            // Don't fail completely - window can still be managed, just not composited
-        } else {
-            window.redirected = true;
-        }
-        conn.flush().ok();
+        // NOTE: We use composite_redirect_subwindows() on root at startup,
+        // so all subwindows are already redirected. No per-window redirect needed.
+        window.redirected = true;
         
         let damage = match conn.generate_id() {
             Ok(id) => {
@@ -294,22 +289,13 @@ impl Compositor {
                     (window.id, !window.redirected)
                 };
                 
-                // Ensure window is redirected before naming pixmap
-                // This is required by Composite extension - windows must be redirected first
-                    if needs_redirect {
-                        if let Some(window) = self.windows.get_mut(&window_id) {
-                            let composite_id = window.id;
-                            if let Err(e) = conn.composite_redirect_window(composite_id, composite::Redirect::MANUAL) {
-                                warn!("Failed to redirect window {} before pixmap naming: {}", composite_id, e);
-                                window.bind_failed = true;
-                                continue;
-                            }
-                            window.redirected = true;
-                            conn.flush().ok();
-                        } else {
-                            continue; // Window removed
-                        }
+                // NOTE: composite_redirect_subwindows() on root handles all subwindows.
+                // Just mark as redirected if not already.
+                if needs_redirect {
+                    if let Some(window) = self.windows.get_mut(&window_id) {
+                        window.redirected = true;
                     }
+                }
                 
                 // Final check: window might have been destroyed between collection and now
                 // Verify it still exists in both our HashMap and in X11 before naming pixmap

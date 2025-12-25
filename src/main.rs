@@ -60,6 +60,9 @@ struct AreaApp {
     
     /// Windows currently being reparented (to ignore UnmapNotify/MapNotify from our own operations)
     reparenting_windows: HashSet<u32>,
+    
+    /// Frame windows created by the WM (to prevent recursive management)
+    frame_windows: HashSet<u32>,
 }
 
 impl AreaApp {
@@ -151,6 +154,7 @@ impl AreaApp {
             _notifications: notifications,
             power,
             reparenting_windows: HashSet::new(),
+            frame_windows: HashSet::new(),
         };
         
         // Scan for existing windows
@@ -359,6 +363,16 @@ impl AreaApp {
                     debug!("Ignoring UnmapNotify for window {} (caused by reparenting)", e.window);
                     return Ok(());
                 }
+                
+                // Don't unmanage framed windows on UnmapNotify - they get unmapped during
+                // reparenting and other normal operations. Only unmanage on DestroyNotify.
+                if let Some(client) = self.wm_windows.get(&e.window) {
+                    if client.frame.is_some() {
+                        debug!("Ignoring UnmapNotify for framed window {} (will unmanage on DestroyNotify)", e.window);
+                        return Ok(());
+                    }
+                }
+                
                 debug!("UnmapNotify for window {}", e.window);
                 self.handle_unmap(e.window)?;
             }
@@ -401,6 +415,13 @@ impl AreaApp {
             
             Event::CreateNotify(e) => {
                 debug!("CreateNotify for window {}", e.window);
+                
+                // Skip frame windows created by the WM
+                if self.frame_windows.contains(&e.window) {
+                    debug!("Skipping CreateNotify for frame window {}", e.window);
+                    return Ok(());
+                }
+                
                 // Auto-manage windows on creation if they're not override-redirect
                 // This ensures windows get managed even if they don't send MapRequest
                 let window_id = e.window;
@@ -430,6 +451,8 @@ impl AreaApp {
                 // Skip overlay window MapNotify - it's expected and handled during compositor init
                 if e.window == self.compositor.overlay_window {
                     debug!("MapNotify for overlay window {} (ignored)", e.window);
+                } else if self.frame_windows.contains(&e.window) {
+                    debug!("Skipping MapNotify for frame window {}", e.window);
                 } else {
                     // Ignore MapNotify events caused by our own reparenting operations
                     if self.reparenting_windows.remove(&e.window) {
@@ -440,7 +463,6 @@ impl AreaApp {
                         }
                         return Ok(());
                     }
-                    debug!("MapNotify for window {}", e.window);
                     debug!("MapNotify for window {}", e.window);
                     // If window is mapped but not managed, manage it now
                     if !self.wm_windows.contains_key(&e.window) {
@@ -556,6 +578,20 @@ impl AreaApp {
                 }
             }
             
+            Event::ConfigureNotify(e) => {
+                // Sync CWindow geometry when window is resized/moved
+                if let Some(c_window) = self.compositor.get_window_mut(e.window) {
+                    c_window.geometry = shared::Geometry::new(
+                        e.x as i32,
+                        e.y as i32,
+                        e.width as u32,
+                        e.height as u32
+                    );
+                    c_window.border_width = e.border_width;
+                    c_window.damaged = true; // Repaint after resize
+                }
+            }
+            
             Event::KeyPress(e) => {
                 debug!("KeyPress: detail={}, state={:?}", e.detail, e.state);
                 // Check for SUPER key (Mod4) - bit 12 (0x1000)
@@ -637,10 +673,13 @@ impl AreaApp {
         let mut client = Client::new(window_id, shared::Geometry::new(0, 0, 100, 100));
         
         // Check if window was already mapped before we took over
-        let was_mapped = self.conn.get_window_attributes(window_id)?
-            .reply()
-            .map(|attrs| attrs.map_state != x11rb::protocol::xproto::MapState::UNMAPPED)
-            .unwrap_or(false);
+        let was_mapped = match self.conn.get_window_attributes(window_id)?.reply() {
+            Ok(attrs) => attrs.map_state != x11rb::protocol::xproto::MapState::UNMAPPED,
+            Err(_) => {
+                debug!("Window {} disappeared before management started", window_id);
+                return Ok(());
+            }
+        };
         
         // Track this window as being reparented to ignore UnmapNotify/MapNotify events
         // caused by our own reparenting operation
@@ -651,6 +690,15 @@ impl AreaApp {
         // Note: This will trigger reparent_window, which causes UnmapNotify -> MapNotify
         // We ignore those events because the window is in reparenting_windows
         self.wm.manage_window(&self.conn, &mut client)?;
+        
+        // Register frame windows to prevent recursive management
+        if let Some(frame) = &client.frame {
+            self.frame_windows.insert(frame.frame);
+            self.frame_windows.insert(frame.titlebar);
+            self.frame_windows.insert(frame.close_button);
+            self.frame_windows.insert(frame.maximize_button);
+            self.frame_windows.insert(frame.minimize_button);
+        }
         
         // Map the window so it becomes visible
         // Map frame first (if exists), then client window
@@ -690,27 +738,37 @@ impl AreaApp {
         // Determine composite target (FRAME or CLIENT)
         let composite_id = client.frame.as_ref().map(|f| f.frame).unwrap_or(client.id);
         
-        // Get actual border width and viewable state from X11
-        let (border_width, viewable) = {
+        // Get actual geometry, border width and viewable state from X11
+        // We use *actual* X11 geometry because pixmap size matches the real window size
+        let (geometry, border_width, viewable) = {
             let geom_result = self.conn.get_geometry(composite_id)?.reply();
             let attr_result = self.conn.get_window_attributes(composite_id)?.reply();
             
             match (geom_result, attr_result) {
                 (Ok(geom), Ok(attr)) => (
+                    shared::Geometry::new(geom.x as i32, geom.y as i32, geom.width as u32, geom.height as u32),
                     geom.border_width,
                     attr.map_state == x11rb::protocol::xproto::MapState::VIEWABLE
                 ),
-                (Ok(geom), Err(_)) => (geom.border_width, was_mapped),
-                (Err(_), Ok(attr)) => (0, attr.map_state == x11rb::protocol::xproto::MapState::VIEWABLE),
-                (Err(_), Err(_)) => (0, was_mapped),
+                (Ok(geom), Err(_)) => (
+                    shared::Geometry::new(geom.x as i32, geom.y as i32, geom.width as u32, geom.height as u32),
+                    geom.border_width,
+                    was_mapped
+                ),
+                (Err(_), Ok(attr)) => (
+                    client.frame_geometry(), // Fallback to calculated
+                    0,
+                    attr.map_state == x11rb::protocol::xproto::MapState::VIEWABLE
+                ),
+                (Err(_), Err(_)) => (client.frame_geometry(), 0, was_mapped),
             }
         };
 
-        // Use frame geometry (client + decorations) for the compositor window
+        // Use actual X11 geometry for the compositor window
         let c_window = CWindow::new(
             composite_id, 
             client.id, 
-            client.frame_geometry(), 
+            geometry, 
             border_width, 
             viewable
         );
@@ -732,6 +790,15 @@ impl AreaApp {
             // Track this window as being unmanaged (reparented back to root)
             // to ignore MapNotify events caused by the unparenting operation
             self.reparenting_windows.insert(window_id);
+            
+            // Unregister frame windows
+            if let Some(frame) = &client.frame {
+                self.frame_windows.remove(&frame.frame);
+                self.frame_windows.remove(&frame.titlebar);
+                self.frame_windows.remove(&frame.close_button);
+                self.frame_windows.remove(&frame.maximize_button);
+                self.frame_windows.remove(&frame.minimize_button);
+            }
             
             // Let compositor clean up
             self.compositor.remove_window(&self.conn, window_id)?;
@@ -758,13 +825,8 @@ impl AreaApp {
         // Update shell screen size if needed
         self.shell.logout_dialog.set_screen_size(self.screen_width, self.screen_height);
         
-        // Sync state: Ensure compositor windows have latest geometry from WM
-        for (id, client) in &self.wm_windows {
-            let composite_id = client.frame.as_ref().map(|f| f.frame).unwrap_or(*id);
-            if let Some(c_window) = self.compositor.get_window_mut(composite_id) {
-                c_window.geometry = client.frame_geometry();
-            }
-        }
+        // NOTE: CWindow geometry is synced via ConfigureNotify events
+        // The pixmap validation also updates geometry from X11 when binding
 
         // Render all windows and shell
         self.compositor.render(&self.conn, &self.shell, self.screen_width as f32, self.screen_height as f32)?;
