@@ -49,6 +49,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         --debug)
             DEBUG_MODE=true
+            LOG_LEVEL="debug"
+            shift
+            ;;
+        --trace)
+            DEBUG_MODE=true
+            LOG_LEVEL="trace"
             shift
             ;;
         --keep)
@@ -64,7 +70,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --watch, -w          Auto-rebuild and restart on source changes"
             echo "  --size, -s SIZE      Screen size (default: 1280x720)"
             echo "  --display, -d DISP   Display number (default: :99)"
-            echo "  --debug              Enable RUST_LOG=debug"
+            echo "  --display, -d DISP   Display number (default: :99)"
+            echo "  --debug              Enable debug build and RUST_LOG=debug"
+            echo "  --trace              Enable debug build and RUST_LOG=trace"
             echo "  --keep               Keep Xephyr running after area exits"
             echo "  --help, -h           Show this help message"
             echo ""
@@ -111,10 +119,16 @@ cleanup() {
     echo ""
     echo "🧹 Cleaning up..."
     
-    # Kill area if running
+    # Kill area if running (kill entire process group to catch background processes)
     if [[ -n "$AREA_PID" ]] && kill -0 "$AREA_PID" 2>/dev/null; then
         echo "   Stopping area (PID: $AREA_PID)..."
-        kill "$AREA_PID" 2>/dev/null || true
+        # Kill process group to ensure all child processes are terminated
+        kill -TERM -"$AREA_PID" 2>/dev/null || kill "$AREA_PID" 2>/dev/null || true
+        sleep 0.5
+        # Force kill if still running
+        if kill -0 "$AREA_PID" 2>/dev/null; then
+            kill -KILL "$AREA_PID" 2>/dev/null || true
+        fi
         wait "$AREA_PID" 2>/dev/null || true
     fi
     
@@ -212,19 +226,35 @@ start_xephyr() {
         fi
         
         # Check if we can connect to the display
-        if DISPLAY="$DISPLAY_NUM" xdpyinfo &>/dev/null; then
-            echo "✅ Xephyr started (PID: $XEPHYR_PID)"
-            return 0
+        if command -v xdpyinfo &>/dev/null; then
+            if DISPLAY="$DISPLAY_NUM" xdpyinfo &>/dev/null; then
+                echo "✅ Xephyr started (PID: $XEPHYR_PID)"
+                return 0
+            fi
+        else
+            # Fallback if xdpyinfo is missing
+            # Check for X socket
+            DISPLAY_NUM_ONLY="${DISPLAY_NUM#:}"
+            if [[ -S "/tmp/.X11-unix/X$DISPLAY_NUM_ONLY" ]]; then
+                echo "✅ Xephyr started (PID: $XEPHYR_PID) [Socket detected, xdpyinfo missing]"
+                return 0
+            fi
         fi
         
-        # Also check for X socket
+        # Also check for X socket explicitly if xdpyinfo check failed for some reason
         DISPLAY_NUM_ONLY="${DISPLAY_NUM#:}"
         if [[ -S "/tmp/.X11-unix/X$DISPLAY_NUM_ONLY" ]]; then
             # Socket exists, give it one more moment
             sleep 0.5
-            if DISPLAY="$DISPLAY_NUM" xdpyinfo &>/dev/null; then
-                echo "✅ Xephyr started (PID: $XEPHYR_PID)"
-                return 0
+            if command -v xdpyinfo &>/dev/null; then
+                if DISPLAY="$DISPLAY_NUM" xdpyinfo &>/dev/null; then
+                    echo "✅ Xephyr started (PID: $XEPHYR_PID)"
+                    return 0
+                fi
+            else
+                 # Trust the socket
+                 echo "✅ Xephyr started (PID: $XEPHYR_PID) [Socket detected]"
+                 return 0
             fi
         fi
         
@@ -253,29 +283,59 @@ run_area() {
     
     # Set environment variables
     export DISPLAY="$DISPLAY_NUM"
+    export RUST_BACKTRACE=1
+    
+    # Force unbuffered output for real-time logs
+    export RUST_LOG_STYLE=always
     
     if [[ "$DEBUG_MODE" == "true" ]]; then
-        export RUST_LOG="${RUST_LOG:-debug}"
+        export RUST_LOG="${RUST_LOG:-${LOG_LEVEL:-debug}}"
         BINARY="$PROJECT_ROOT/target/debug/area"
     else
-        export RUST_LOG="${RUST_LOG:-info}"
+        # Default to debug level for development script to see WM acquisition details
+        export RUST_LOG="${RUST_LOG:-debug}"
         BINARY="$PROJECT_ROOT/target/release/area"
     fi
     
+    # Create logs directory
+    LOGS_DIR="$PROJECT_ROOT/logs"
+    mkdir -p "$LOGS_DIR"
+    
+    # Generate timestamped log filenames
+    TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+    FULL_LOG="$LOGS_DIR/area_full_${TIMESTAMP}.log"
+    WARN_ERROR_LOG="$LOGS_DIR/area_warnings_errors_${TIMESTAMP}.log"
+    
     echo "   DISPLAY=$DISPLAY"
     echo "   RUST_LOG=$RUST_LOG"
+    echo "   RUST_BACKTRACE=$RUST_BACKTRACE"
     echo "   Binary: $BINARY"
+    echo "   📝 Full log: $FULL_LOG"
+    echo "   ⚠️  Warnings/Errors: $WARN_ERROR_LOG"
     echo ""
     echo "─────────────────────────────────────────────────────────────────────"
     echo ""
     
-    # Run area
-    "$BINARY" &
-    AREA_PID=$!
-    
-    # Wait for area to exit
-    wait "$AREA_PID"
-    AREA_EXIT_CODE=$?
+    # Run area with output captured to both terminal and log files
+    # Use tee to duplicate output: one stream to full log, another filtered to warnings/errors log
+    # Process substitution allows us to filter in real-time without hiding output from terminal
+    if command -v stdbuf &>/dev/null; then
+        # Use tee with process substitution to duplicate stream:
+        # - All output goes to terminal (via stdout)
+        # - All output goes to full log file
+        # - Filtered WARN/ERROR output goes to warnings/errors log file
+        # Pattern matches: "WARN", "ERROR" (Rust tracing levels), "warning", "error", and emoji indicators
+        stdbuf -oL -eL "$BINARY" 2>&1 | \
+            tee "$FULL_LOG" | \
+            tee >(grep --line-buffered -iE "( WARN | ERROR |warning|error|⚠️|❌)" >> "$WARN_ERROR_LOG")
+        AREA_EXIT_CODE=${PIPESTATUS[0]}
+    else
+        # Fallback: run directly and capture output
+        "$BINARY" 2>&1 | \
+            tee "$FULL_LOG" | \
+            tee >(grep --line-buffered -iE "( WARN | ERROR |warning|error|⚠️|❌)" >> "$WARN_ERROR_LOG")
+        AREA_EXIT_CODE=${PIPESTATUS[0]}
+    fi
     
     echo ""
     echo "─────────────────────────────────────────────────────────────────────"
@@ -284,6 +344,12 @@ run_area() {
         echo "✅ Area exited normally"
     else
         echo "⚠️  Area exited with code: $AREA_EXIT_CODE"
+    fi
+    
+    # Show summary of warnings/errors if any were captured
+    if [[ -f "$WARN_ERROR_LOG" ]] && [[ -s "$WARN_ERROR_LOG" ]]; then
+        WARN_ERROR_COUNT=$(wc -l < "$WARN_ERROR_LOG")
+        echo "   📊 Captured $WARN_ERROR_COUNT warning/error lines in: $WARN_ERROR_LOG"
     fi
     
     return "$AREA_EXIT_CODE"
@@ -310,7 +376,27 @@ watch_and_reload() {
     while true; do
         # Build and run
         if build_area; then
-            run_area &
+            # Run area in background for watch mode, but capture output
+            (
+                export DISPLAY="$DISPLAY_NUM"
+                export RUST_BACKTRACE=1
+                export RUST_LOG_STYLE=always
+                
+                if [[ "$DEBUG_MODE" == "true" ]]; then
+                    export RUST_LOG="${RUST_LOG:-${LOG_LEVEL:-debug}}"
+                    BINARY="$PROJECT_ROOT/target/debug/area"
+                else
+                    export RUST_LOG="${RUST_LOG:-debug}"
+                    BINARY="$PROJECT_ROOT/target/release/area"
+                fi
+                
+                # Use stdbuf for unbuffered output if available
+                if command -v stdbuf &>/dev/null; then
+                    stdbuf -oL -eL "$BINARY"
+                else
+                    "$BINARY"
+                fi
+            ) &
             AREA_PID=$!
             
             # Wait for file changes

@@ -2,7 +2,4 @@
 
 pub mod window_state;
 
-pub use window_state::{
-    Window, Geometry,
-    
-};
+pub use window_state::Geometry;

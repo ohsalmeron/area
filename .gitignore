@@ -27,6 +27,7 @@ Thumbs.db
 # Log files
 *.log
 xephyr.log
+logs/
 
 # Python (for fusion-icon)
 __pycache__/

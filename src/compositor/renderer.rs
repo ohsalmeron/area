@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use std::ffi::CString;
 use std::ptr;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 /// Texture resources for a window
 struct WindowTexture {
@@ -190,10 +190,10 @@ impl Renderer {
             }
 
             // Transactional: Create new GLX pixmap FIRST
-            debug!("Creating GLX pixmap for window {} (X11 pixmap {}, depth {})", window_id, x11_pixmap, depth);
+            trace!("Creating GLX pixmap for window {} (X11 pixmap {}, depth {})", window_id, x11_pixmap, depth);
             let new_glx_pixmap = match ctx.create_glx_pixmap(x11_pixmap, depth) {
                 Ok(glx_pixmap) => {
-                    debug!("Successfully created GLX pixmap {} for window {}", glx_pixmap, window_id);
+                    trace!("Successfully created GLX pixmap {} for window {}", glx_pixmap, window_id);
                     glx_pixmap
                 }
                 Err(e) => {
@@ -214,11 +214,11 @@ impl Renderer {
                 
                 // DON'T bind here - we use strict binding mode (bind every frame)
                 // Like compiz: if (!strictBinding) { bindTexImage } - we skip this since strictBinding=true
-                debug!("Created GLX pixmap {} for existing texture {} for window {} (strict binding - will bind every frame)", new_glx_pixmap, win_tex.texture, window_id);
+                trace!("Created GLX pixmap {} for existing texture {} for window {} (strict binding - will bind every frame)", new_glx_pixmap, win_tex.texture, window_id);
 
                 win_tex.glx_pixmap = Some(new_glx_pixmap);
                 win_tex.x11_pixmap = Some(x11_pixmap);
-                debug!("Updated texture for window {} - glx_pixmap={:?}, texture={}", window_id, win_tex.glx_pixmap, win_tex.texture);
+                trace!("Updated texture for window {} - glx_pixmap={:?}, texture={}", window_id, win_tex.glx_pixmap, win_tex.texture);
                 
                 Ok(old_x11)
             } else {
@@ -236,7 +236,7 @@ impl Renderer {
                 
                 // DON'T bind here - we use strict binding mode (bind every frame)
                 // Like compiz: if (!strictBinding) { bindTexImage } - we skip this since strictBinding=true
-                debug!("Created GLX pixmap {} for new texture {} for window {} (strict binding - will bind every frame)", new_glx_pixmap, texture, window_id);
+                trace!("Created GLX pixmap {} for new texture {} for window {} (strict binding - will bind every frame)", new_glx_pixmap, texture, window_id);
                 gl::BindTexture(gl::TEXTURE_2D, 0);
 
                 // Get pixmap dimensions for tracking
@@ -247,7 +247,7 @@ impl Renderer {
                     x11_pixmap: Some(x11_pixmap),
                 });
                 
-                debug!("Inserted texture for window {} into HashMap - has_texture now returns: {}", window_id, self.has_texture(window_id));
+                trace!("Inserted texture for window {} into HashMap - has_texture now returns: {}", window_id, self.has_texture(window_id));
 
                 Ok(None)
             }

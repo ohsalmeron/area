@@ -7,9 +7,10 @@ mod wm;
 mod compositor;
 mod shared;
 mod shell;
+mod dbus;
 
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -18,7 +19,8 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::ConnectionExt;
 use x11rb::protocol::xproto::ConfigureWindowAux;
 use x11rb::protocol::Event;
-use shared::Window;
+use wm::client::Client;
+use compositor::c_window::CWindow;
 
 /// Main application state
 struct AreaApp {
@@ -28,8 +30,8 @@ struct AreaApp {
     /// Root window
     root: u32,
     
-    /// All managed windows (shared between WM and compositor)
-    windows: HashMap<u32, Window>,
+    /// WM Clients (Window Manager state)
+    wm_windows: HashMap<u32, Client>,
     
     /// Window manager state
     wm: wm::WindowManager,
@@ -46,11 +48,26 @@ struct AreaApp {
     /// Screen dimensions
     screen_width: u16,
     screen_height: u16,
+
+    /// D-Bus manager
+    _dbus: Option<dbus::DbusManager>,
+    
+    /// Notification service
+    _notifications: Option<dbus::notifications::NotificationService>,
+    
+    /// Power management service
+    power: Option<dbus::power::PowerService>,
+    
+    /// Windows currently being reparented (to ignore UnmapNotify/MapNotify from our own operations)
+    reparenting_windows: HashSet<u32>,
 }
 
 impl AreaApp {
     /// Initialize the application
-    async fn new() -> Result<Self> {
+    /// 
+    /// # Arguments
+    /// * `replace` - If true, attempt to replace existing WM
+    async fn new(replace: bool) -> Result<Self> {
         // Connect to X11
         let (conn, screen_num) = x11rb::connect(None)
             .context("Failed to connect to X server")?;
@@ -65,7 +82,7 @@ impl AreaApp {
         info!("Screen size: {}x{}", screen_width, screen_height);
         
         // Initialize window manager
-        let wm = wm::WindowManager::new(&conn, screen_num, root)
+        let wm = wm::WindowManager::new(&conn, screen_num, root, replace)
             .context("Failed to initialize window manager")?;
         
         // Initialize compositor
@@ -75,16 +92,65 @@ impl AreaApp {
         // Initialize shell
         let shell = shell::Shell::new(screen_width, screen_height);
         
+        // Initialize D-Bus (optional, won't fail if D-Bus unavailable)
+        let dbus = match dbus::DbusManager::new().await {
+            Ok(d) => {
+                info!("D-Bus initialized");
+                Some(d)
+            }
+            Err(e) => {
+                warn!("D-Bus unavailable: {}. Desktop services disabled.", e);
+                None
+            }
+        };
+        
+        // Initialize desktop services
+        let notifications = if let Some(ref dbus) = dbus {
+            match dbus::notifications::NotificationService::new(dbus.connection()).await {
+                Ok(n) => Some(n),
+                Err(e) => {
+                    warn!("Notifications unavailable: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        
+        let power = if let Some(ref dbus) = dbus {
+            match dbus::power::PowerService::new(dbus.connection()).await {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    warn!("Power management unavailable: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        
+        // Show startup notification
+        if let Some(ref notif) = notifications {
+            let _ = notif.show_simple(
+                "Area Started",
+                "Window manager and compositor ready"
+            ).await;
+        }
+        
         let mut app = Self {
             conn,
             root,
-            windows: HashMap::new(),
+            wm_windows: HashMap::new(),
             wm,
             compositor,
             shell,
             last_frame: Instant::now(),
             screen_width,
             screen_height,
+            _dbus: dbus,
+            _notifications: notifications,
+            power,
+            reparenting_windows: HashSet::new(),
         };
         
         // Scan for existing windows
@@ -172,7 +238,7 @@ impl AreaApp {
                                 error!("Error handling event: {}", e);
                             }
                             // After handling event, check if we need to render
-                            needs_render = self.windows.values().any(|w| w.needs_render());
+                            needs_render = self.compositor.any_damaged();
                         }
                         Ok(Err(e)) => {
                             error!("Error receiving X11 event: {}", e);
@@ -199,9 +265,7 @@ impl AreaApp {
                         error!("Error rendering frame: {}", e);
                     }
                     // Clear damage flags after rendering
-                    for window in self.windows.values_mut() {
-                        window.comp.damaged = false;
-                    }
+                    self.compositor.clear_damage();
                     needs_render = false;
                 }
                 
@@ -213,9 +277,7 @@ impl AreaApp {
                             error!("Error rendering frame: {}", e);
                         }
                         // Clear damage flags after rendering
-                        for window in self.windows.values_mut() {
-                            window.comp.damaged = false;
-                        }
+                        self.compositor.clear_damage();
                         needs_render = false;
                     }
                 }
@@ -246,7 +308,7 @@ impl AreaApp {
             }
             
             // Skip if already managed
-            if self.windows.contains_key(&window_id) {
+            if self.wm_windows.contains_key(&window_id) {
                 continue;
             }
             
@@ -262,13 +324,22 @@ impl AreaApp {
         }
         
         // Now manage the windows
+        let mut managed_count = 0;
+        let mut failed_count = 0;
+        
         for window_id in windows_to_manage {
             debug!("Found unmanaged window {}, attempting to manage", window_id);
             if let Err(err) = self.handle_map_request(window_id) {
                 debug!("Failed to manage window {}: {}", window_id, err);
+                failed_count += 1;
             } else {
-                info!("Successfully managed previously unmanaged window {}", window_id);
+                debug!("Successfully managed previously unmanaged window {}", window_id);
+                managed_count += 1;
             }
+        }
+        
+        if managed_count > 0 || failed_count > 0 {
+            info!("Window scan complete: {} managed, {} failed", managed_count, failed_count);
         }
         
         Ok(())
@@ -283,7 +354,12 @@ impl AreaApp {
             }
             
             Event::UnmapNotify(e) => {
-                info!("UnmapNotify for window {}", e.window);
+                // Ignore UnmapNotify events caused by our own reparenting operations
+                if self.reparenting_windows.contains(&e.window) {
+                    debug!("Ignoring UnmapNotify for window {} (caused by reparenting)", e.window);
+                    return Ok(());
+                }
+                debug!("UnmapNotify for window {}", e.window);
                 self.handle_unmap(e.window)?;
             }
             
@@ -306,15 +382,15 @@ impl AreaApp {
                 self.conn.flush()?;
                 
                 // Update geometry if window is already managed
-                if let Some(window) = self.windows.get_mut(&e.window) {
+                if let Some(client) = self.wm_windows.get_mut(&e.window) {
                     if e.width > 10 && e.height > 10 {
-                        window.geometry.width = e.width as u32;
-                        window.geometry.height = e.height as u32;
-                        window.geometry.x = e.x as i32;
-                        window.geometry.y = e.y as i32;
+                        client.geometry.width = e.width as u32;
+                        client.geometry.height = e.height as u32;
+                        client.geometry.x = e.x as i32;
+                        client.geometry.y = e.y as i32;
                         info!("Updated geometry for managed window {} to {}x{}", e.window, e.width, e.height);
                     }
-                } else if !self.windows.contains_key(&e.window) && e.width > 10 && e.height > 10 {
+                } else if !self.wm_windows.contains_key(&e.window) && e.width > 10 && e.height > 10 {
                     // If this window isn't managed yet and has reasonable size, try to manage it
                     info!("Window {} configured with size {}x{}, attempting to manage", e.window, e.width, e.height);
                     if let Err(err) = self.handle_map_request(e.window) {
@@ -324,11 +400,11 @@ impl AreaApp {
             }
             
             Event::CreateNotify(e) => {
-                info!("CreateNotify for window {}", e.window);
+                debug!("CreateNotify for window {}", e.window);
                 // Auto-manage windows on creation if they're not override-redirect
                 // This ensures windows get managed even if they don't send MapRequest
                 let window_id = e.window;
-                if window_id != self.compositor.overlay_window && !self.windows.contains_key(&window_id) {
+                if window_id != self.compositor.overlay_window && !self.wm_windows.contains_key(&window_id) {
                     // Check if window is override-redirect
                     let should_manage = match self.conn.get_window_attributes(window_id)?.reply() {
                         Ok(attrs) => !attrs.override_redirect,
@@ -347,7 +423,7 @@ impl AreaApp {
             }
             
             Event::DestroyNotify(e) => {
-                info!("DestroyNotify for window {}", e.window);
+                debug!("DestroyNotify for window {}", e.window);
             }
             
             Event::MapNotify(e) => {
@@ -355,17 +431,27 @@ impl AreaApp {
                 if e.window == self.compositor.overlay_window {
                     debug!("MapNotify for overlay window {} (ignored)", e.window);
                 } else {
-                    info!("MapNotify for window {}", e.window);
+                    // Ignore MapNotify events caused by our own reparenting operations
+                    if self.reparenting_windows.remove(&e.window) {
+                        debug!("Ignoring MapNotify for window {} (caused by reparenting)", e.window);
+                        // Window is already managed, just mark it as mapped
+                        if let Some(client) = self.wm_windows.get_mut(&e.window) {
+                            client.mapped = true;
+                        }
+                        return Ok(());
+                    }
+                    debug!("MapNotify for window {}", e.window);
+                    debug!("MapNotify for window {}", e.window);
                     // If window is mapped but not managed, manage it now
-                    if !self.windows.contains_key(&e.window) {
+                    if !self.wm_windows.contains_key(&e.window) {
                         debug!("Window {} mapped but not managed, managing now", e.window);
                         if let Err(err) = self.handle_map_request(e.window) {
                             debug!("Failed to manage mapped window {}: {}", e.window, err);
                         }
                     } else {
                         // Window is already managed, just mark it as mapped
-                        if let Some(window) = self.windows.get_mut(&e.window) {
-                            window.mapped = true;
+                        if let Some(client) = self.wm_windows.get_mut(&e.window) {
+                            client.mapped = true;
                         }
                     }
                 }
@@ -383,12 +469,12 @@ impl AreaApp {
                 debug!("ButtonPress on window {} at ({}, {})", e.event, e.event_x, e.event_y);
                 
                 // Check if click is on shell elements first
-                if let Err(err) = self.shell.handle_click(e.event_x, e.event_y) {
+                if let Err(err) = self.shell.handle_click(e.event_x, e.event_y, &self.power).await {
                     warn!("Error handling shell click: {}", err);
                 }
                 
                 // Check if click is on a window decoration button or titlebar
-                if let Some((window_id, button_type)) = self.wm.find_window_from_button(&self.windows, e.event) {
+                if let Some((window_id, button_type)) = self.wm.find_window_from_button(&self.wm_windows, e.event) {
                     if let Some(btn_type) = button_type {
                         // Handle button click
                         match btn_type {
@@ -398,29 +484,29 @@ impl AreaApp {
                                 }
                             }
                             wm::ButtonType::Maximize => {
-                                if let Err(err) = self.wm.toggle_maximize(&self.conn, &mut self.windows, window_id) {
+                                if let Err(err) = self.wm.toggle_maximize(&self.conn, &mut self.wm_windows, window_id) {
                                     error!("Failed to toggle maximize window {}: {}", window_id, err);
                                 }
                             }
                             wm::ButtonType::Minimize => {
-                                if let Err(err) = self.wm.minimize_window(&self.conn, &mut self.windows, window_id) {
+                                if let Err(err) = self.wm.minimize_window(&self.conn, &mut self.wm_windows, window_id) {
                                     error!("Failed to minimize window {}: {}", window_id, err);
                                 }
                             }
                         }
                     } else {
                         // Titlebar click - start drag and focus window
-                        if let Err(err) = self.wm.set_focus(&self.conn, &mut self.windows, window_id) {
+                        if let Err(err) = self.wm.set_focus(&self.conn, &mut self.wm_windows, window_id) {
                             warn!("Failed to focus window {}: {}", window_id, err);
                         }
-                        if let Err(err) = self.wm.start_drag(&self.conn, &self.windows, window_id, e.event_x, e.event_y) {
+                        if let Err(err) = self.wm.start_drag(&self.conn, &self.wm_windows, window_id, e.event_x, e.event_y) {
                             warn!("Failed to start drag for window {}: {}", window_id, err);
                         }
                     }
                 } else {
                     // Click on client window - focus it
-                    if self.windows.contains_key(&e.event) {
-                        if let Err(err) = self.wm.set_focus(&self.conn, &mut self.windows, e.event) {
+                    if self.wm_windows.contains_key(&e.event) {
+                        if let Err(err) = self.wm.set_focus(&self.conn, &mut self.wm_windows, e.event) {
                             warn!("Failed to focus window {}: {}", e.event, err);
                         }
                     }
@@ -437,7 +523,7 @@ impl AreaApp {
             Event::MotionNotify(e) => {
                 // Handle drag
                 if self.wm.is_dragging() {
-                    if let Err(err) = self.wm.update_drag(&self.conn, &mut self.windows, e.event_x, e.event_y) {
+                    if let Err(err) = self.wm.update_drag(&self.conn, &mut self.wm_windows, e.event_x, e.event_y) {
                         debug!("Error updating drag: {}", err);
                     }
                 }
@@ -446,27 +532,27 @@ impl AreaApp {
             Event::Expose(e) => {
                 debug!("Expose for window {}", e.window);
                 // Mark window as damaged
-                if let Some(window) = self.windows.get_mut(&e.window) {
-                    window.comp.damaged = true;
+                if let Some(window) = self.compositor.get_window_mut(e.window) {
+                    window.damaged = true;
                 }
             }
             
             Event::DamageNotify(e) => {
                 // Handle Damage extension events - window content has changed
-                info!("🔴 DamageNotify for drawable {} (damage {}, level {:?})", e.drawable, e.damage, e.level);
+                debug!("🔴 DamageNotify for drawable {} (damage {}, level {:?})", e.drawable, e.damage, e.level);
                 
-                // Find window by damage ID or by drawable (window ID)
-                let mut found = false;
-                for window in self.windows.values_mut() {
-                    if window.comp.damage == Some(e.damage) || window.id == e.drawable {
-                        window.comp.damaged = true;
-                        info!("✅ Marked window {} as damaged (damage ID {}, drawable {})", window.id, e.damage, e.drawable);
-                        found = true;
-                        break;
-                    }
-                }
+                // Try to find and mark window as damaged
+                let found = if let Some(window) = self.compositor.get_window_mut(e.drawable) {
+                    window.damaged = true;
+                    debug!("✅ Marked window {} as damaged (damage ID {}, drawable {})", window.id, e.damage, e.drawable);
+                    true
+                } else {
+                    false
+                };
                 if !found {
-                    debug!("DamageNotify for unknown window (damage {}, drawable {})", e.damage, e.drawable);
+                    // Damage events for destroyed windows are expected - downgrade to trace
+                    use tracing::trace;
+                    trace!("DamageNotify for unknown window (damage {}, drawable {})", e.damage, e.drawable);
                 }
             }
             
@@ -485,6 +571,35 @@ impl AreaApp {
                 }
             }
             
+            Event::ReparentNotify(e) => {
+                // We don't need to do anything for reparent events, but we track them
+                // to ignore subsequent Map/Unmap events if needed.
+                // Just log at trace to avoid spamming "Unhandled event"
+                use tracing::trace;
+                trace!("ReparentNotify for window {}", e.window);
+            }
+
+            Event::Error(e) => {
+                // Handle X11 errors - many are expected (e.g., operations on destroyed windows)
+                use x11rb::protocol::ErrorKind;
+                match e.error_kind {
+                    ErrorKind::Window | ErrorKind::Drawable | ErrorKind::Match => {
+                        // Expected errors when windows are destroyed - trace level
+                        use tracing::trace;
+                        trace!("X11 error (expected for destroyed windows): {:?}", e);
+                    }
+                    ErrorKind::DamageBadDamage => {
+                        // Also common during destruction
+                        use tracing::trace;
+                        trace!("Damage error (expected for destroyed windows): {:?}", e);
+                    }
+                    _ => {
+                        // Unexpected errors - warn level
+                        warn!("X11 error: {:?}", e);
+                    }
+                }
+            }
+            
             _ => {
                 // Log unknown events at debug level
                 debug!("Unhandled event: {:?}", event);
@@ -497,14 +612,14 @@ impl AreaApp {
     /// Handle MapRequest event
     fn handle_map_request(&mut self, window_id: u32) -> Result<()> {
         // Skip if already managed
-        if self.windows.contains_key(&window_id) {
+        if self.wm_windows.contains_key(&window_id) {
             debug!("Window {} already managed, mapping it", window_id);
             // Map the window if it's not already mapped
-            if let Some(window) = self.windows.get_mut(&window_id) {
+            if let Some(client) = self.wm_windows.get_mut(&window_id) {
                 // If window was minimized, restore it
-                if window.wm.flags.minimized {
-                    window.wm.flags.minimized = false;
-                    if let Some(frame) = &window.wm.frame {
+                if client.state.minimized {
+                    client.state.minimized = false;
+                    if let Some(frame) = &client.frame {
                         self.conn.map_window(frame.frame)?;
                     } else {
                         self.conn.map_window(window_id)?;
@@ -512,14 +627,14 @@ impl AreaApp {
                 } else {
                     self.conn.map_window(window_id)?;
                 }
-                window.mapped = true;
+                client.mapped = true;
             }
             self.conn.flush()?;
             return Ok(());
         }
         
-        // Create new window or restore existing window
-        let mut window = Window::new(window_id);
+        // Create new client with default geometry (will be updated by manage_window)
+        let mut client = Client::new(window_id, shared::Geometry::new(0, 0, 100, 100));
         
         // Check if window was already mapped before we took over
         let was_mapped = self.conn.get_window_attributes(window_id)?
@@ -527,32 +642,38 @@ impl AreaApp {
             .map(|attrs| attrs.map_state != x11rb::protocol::xproto::MapState::UNMAPPED)
             .unwrap_or(false);
         
+        // Track this window as being reparented to ignore UnmapNotify/MapNotify events
+        // caused by our own reparenting operation
+        self.reparenting_windows.insert(window_id);
+        
         // Let WM manage the window (creates frame, decorations, etc.)
         // This will restore the window's geometry and decorations
-        self.wm.manage_window(&self.conn, &mut window)?;
+        // Note: This will trigger reparent_window, which causes UnmapNotify -> MapNotify
+        // We ignore those events because the window is in reparenting_windows
+        self.wm.manage_window(&self.conn, &mut client)?;
         
         // Map the window so it becomes visible
         // Map frame first (if exists), then client window
-        if let Some(frame) = &window.wm.frame {
+        if let Some(frame) = &client.frame {
             // Frame should already be mapped by decorations code, but ensure it's visible
             self.conn.map_window(frame.frame)?;
         }
         // Map the client window (restore it if it was mapped before)
         if was_mapped {
             self.conn.map_window(window_id)?;
-            window.mapped = true;
-            info!("Restored and mapped window {} (was previously mapped)", window_id);
+            client.mapped = true;
+            debug!("Restored and mapped window {} (was previously mapped)", window_id);
         } else {
             // Window wasn't mapped, but map it anyway so user can see it
             self.conn.map_window(window_id)?;
-            window.mapped = true;
-            info!("Mapped new window {}", window_id);
+            client.mapped = true;
+            debug!("Mapped new window {}", window_id);
         }
         self.conn.flush()?;
         
         // Raise window to ensure it's visible (bring to front)
         use x11rb::protocol::xproto::StackMode;
-        if let Some(frame) = &window.wm.frame {
+        if let Some(frame) = &client.frame {
             self.conn.configure_window(
                 frame.frame,
                 &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
@@ -566,30 +687,60 @@ impl AreaApp {
         self.conn.flush()?;
         
         // Let compositor register the window (creates texture, damage tracking)
-        // This may fail for some windows (BadPixmap), but we continue anyway
-        if let Err(e) = self.compositor.add_window(&self.conn, &mut window) {
+        // Determine composite target (FRAME or CLIENT)
+        let composite_id = client.frame.as_ref().map(|f| f.frame).unwrap_or(client.id);
+        
+        // Get actual border width and viewable state from X11
+        let (border_width, viewable) = {
+            let geom_result = self.conn.get_geometry(composite_id)?.reply();
+            let attr_result = self.conn.get_window_attributes(composite_id)?.reply();
+            
+            match (geom_result, attr_result) {
+                (Ok(geom), Ok(attr)) => (
+                    geom.border_width,
+                    attr.map_state == x11rb::protocol::xproto::MapState::VIEWABLE
+                ),
+                (Ok(geom), Err(_)) => (geom.border_width, was_mapped),
+                (Err(_), Ok(attr)) => (0, attr.map_state == x11rb::protocol::xproto::MapState::VIEWABLE),
+                (Err(_), Err(_)) => (0, was_mapped),
+            }
+        };
+
+        // Use frame geometry (client + decorations) for the compositor window
+        let c_window = CWindow::new(
+            composite_id, 
+            client.id, 
+            client.frame_geometry(), 
+            border_width, 
+            viewable
+        );
+
+        if let Err(e) = self.compositor.add_window(&self.conn, c_window) {
             warn!("Failed to add window {} to compositor: {}. Window will still be managed.", window_id, e);
         }
         
         // Store window
-        self.windows.insert(window_id, window);
+        self.wm_windows.insert(window_id, client);
         
-        info!("Managed and mapped new window {}", window_id);
+        debug!("Managed and mapped new window {}", window_id);
         Ok(())
     }
     
     /// Handle UnmapNotify event
     fn handle_unmap(&mut self, window_id: u32) -> Result<()> {
-        if let Some(mut window) = self.windows.remove(&window_id) {
+        if let Some(mut client) = self.wm_windows.remove(&window_id) {
+            // Track this window as being unmanaged (reparented back to root)
+            // to ignore MapNotify events caused by the unparenting operation
+            self.reparenting_windows.insert(window_id);
+            
             // Let compositor clean up
-            self.compositor.remove_window(&self.conn, &mut window)?;
+            self.compositor.remove_window(&self.conn, window_id)?;
             
-            // Let WM clean up
-            self.wm.unmanage_window(&self.conn, &mut window)?;
+            // Let WM clean up (this will reparent window back to root)
+            self.wm.unmanage_window(&self.conn, &mut client)?;
             
-            info!("Unmanaged window {}", window_id);
+            debug!("Unmanaged window {}", window_id);
         }
-        
         Ok(())
     }
     
@@ -607,8 +758,16 @@ impl AreaApp {
         // Update shell screen size if needed
         self.shell.logout_dialog.set_screen_size(self.screen_width, self.screen_height);
         
+        // Sync state: Ensure compositor windows have latest geometry from WM
+        for (id, client) in &self.wm_windows {
+            let composite_id = client.frame.as_ref().map(|f| f.frame).unwrap_or(*id);
+            if let Some(c_window) = self.compositor.get_window_mut(composite_id) {
+                c_window.geometry = client.frame_geometry();
+            }
+        }
+
         // Render all windows and shell
-        self.compositor.render(&self.conn, &mut self.windows, &self.shell, self.screen_width as f32, self.screen_height as f32)?;
+        self.compositor.render(&self.conn, &self.shell, self.screen_width as f32, self.screen_height as f32)?;
         
         // Log FPS every 60 frames
         static FRAME_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -633,8 +792,16 @@ async fn main() -> Result<()> {
     
     info!("Starting Area Window Manager + Compositor");
     
+    // Parse command line arguments
+    let args: Vec<String> = std::env::args().collect();
+    let replace = args.iter().any(|arg| arg == "--replace" || arg == "-r");
+    
+    if replace {
+        info!("--replace flag detected: will attempt to replace existing WM");
+    }
+    
     // Create and run application
-    let app = AreaApp::new().await?;
+    let app = AreaApp::new(replace).await?;
     app.run().await?;
     
     Ok(())

@@ -28,10 +28,10 @@ impl Shell {
     }
     
     /// Handle mouse click
-    pub fn handle_click(&mut self, x: i16, y: i16) -> Result<()> {
+    pub async fn handle_click(&mut self, x: i16, y: i16, power: &Option<crate::dbus::power::PowerService>) -> Result<()> {
         // Check if click is on logout dialog first (it's on top)
         if self.logout_dialog.visible {
-            if self.logout_dialog.handle_click(x, y)? {
+            if self.logout_dialog.handle_click(x, y, power).await? {
                 return Ok(());
             }
         }

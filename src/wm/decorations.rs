@@ -80,7 +80,8 @@ impl WindowFrame {
                         | EventMask::BUTTON_PRESS
                         | EventMask::BUTTON_RELEASE
                         | EventMask::POINTER_MOTION,
-                ),
+                )
+                .override_redirect(1),
         )?;
 
         // Create titlebar
@@ -101,7 +102,12 @@ impl WindowFrame {
         )?;
 
         // Create close button
-        let close_x = width - BUTTON_SIZE - BUTTON_PADDING;
+        // Use i32 for calculations to avoid underflow on small windows
+        let width_i32 = width as i32;
+        let btn_size = BUTTON_SIZE as i32;
+        let pad = BUTTON_PADDING as i32;
+
+        let close_x = width_i32 - btn_size - pad;
         let btn_y = (TITLEBAR_HEIGHT - BUTTON_SIZE) / 2;
         conn.create_window(
             screen.root_depth,
@@ -120,7 +126,7 @@ impl WindowFrame {
         )?;
 
         // Create maximize button
-        let max_x = close_x - BUTTON_SIZE - BUTTON_PADDING;
+        let max_x = close_x - btn_size - pad;
         conn.create_window(
             screen.root_depth,
             maximize_button,
@@ -138,7 +144,7 @@ impl WindowFrame {
         )?;
 
         // Create minimize button
-        let min_x = max_x - BUTTON_SIZE - BUTTON_PADDING;
+        let min_x = max_x - btn_size - pad;
         conn.create_window(
             screen.root_depth,
             minimize_button,
