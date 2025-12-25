@@ -8,6 +8,7 @@ pub mod gl_context;
 pub mod dri3;
 pub mod fps;
 pub mod c_window;
+pub mod cursor;
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -22,12 +23,14 @@ use x11rb::protocol::ErrorKind;
 use crate::compositor::c_window::CWindow;
 use gl_context::GlContext;
 use renderer::Renderer;
+use cursor::CursorManager;
 
 pub struct Compositor {
     pub overlay_window: u32,
     gl_context: Option<GlContext>,
     renderer: Option<Renderer>,
     fps_counter: fps::FpsCounter,
+    pub cursor_manager: Option<CursorManager>,
     
     /// Managed windows (owned by Compositor)
     windows: HashMap<u32, CWindow>,
@@ -127,11 +130,24 @@ impl Compositor {
             }
         });
         
+        // Initialize cursor manager
+        let cursor_manager = match CursorManager::new(conn, root) {
+            Ok(cursor) => {
+                info!("Cursor manager initialized");
+                Some(cursor)
+            }
+            Err(e) => {
+                warn!("Failed to initialize cursor manager: {}", e);
+                None
+            }
+        };
+        
         Ok(Self {
             overlay_window,
             gl_context,
             renderer,
             fps_counter: fps::FpsCounter::new(),
+            cursor_manager,
             windows: HashMap::new(),
         })
     }
@@ -426,43 +442,47 @@ impl Compositor {
                     }
             }
             
-            // Second pass: render windows
-            for window in self.windows.values() {
-                if window.damaged || !renderer.has_texture(window.id) {
-                    let window_y = window.geometry.y as f32;
-                    let adjusted_y = if window_y < panel_height {
-                        panel_height
-                    } else {
-                        window_y
-                    };
+            // Second pass: render windows in sorted order (by window ID for now)
+            // This ensures consistent z-order instead of arbitrary HashMap iteration
+            let mut windows_to_render: Vec<_> = self.windows.values().collect();
+            windows_to_render.sort_by_key(|w| w.id);
+            
+            
+            for window in windows_to_render {
+                // Render all windows every frame (damage tracking will be optimized later)
+                let window_y = window.geometry.y as f32;
+                let adjusted_y = if window_y < panel_height {
+                    panel_height
+                } else {
+                    window_y
+                };
+                
+                if renderer.has_texture(window.id) {
+                    let render_height = window.geometry.height as f32;
                     
-                    if renderer.has_texture(window.id) {
-                        let render_height = window.geometry.height as f32;
-                        
-                        renderer.render_window(
-                            gl_context,
-                            window.id,
-                            window.geometry.x as f32,
-                            adjusted_y,
-                            window.geometry.width as f32,
-                            render_height,
-                            screen_width,
-                            screen_height,
-                            window.opacity,
-                            window.damaged,
-                        );
-                    } else {
-                        renderer.render_window_fallback(
-                            gl_context,
-                            window.id,
-                            window.geometry.x as f32,
-                            adjusted_y,
-                            window.geometry.width as f32,
-                            window.geometry.height as f32,
-                            screen_width,
-                            screen_height,
-                        );
-                    }
+                    renderer.render_window(
+                        gl_context,
+                        window.id,
+                        window.geometry.x as f32,
+                        adjusted_y,
+                        window.geometry.width as f32,
+                        render_height,
+                        screen_width,
+                        screen_height,
+                        window.opacity,
+                        window.damaged,
+                    );
+                } else {
+                    renderer.render_window_fallback(
+                        gl_context,
+                        window.id,
+                        window.geometry.x as f32,
+                        adjusted_y,
+                        window.geometry.width as f32,
+                        window.geometry.height as f32,
+                        screen_width,
+                        screen_height,
+                    );
                 }
             }
             
@@ -479,6 +499,38 @@ impl Compositor {
             shell.panel.render(renderer, screen_width, screen_height);
             shell.logout_dialog.render(renderer, screen_width, screen_height);
             
+            // Render cursor if visible
+            if let Some(ref mut cursor) = self.cursor_manager {
+                if cursor.visible && cursor.width > 0 && cursor.height > 0 && !cursor.pixels.is_empty() {
+                    // Update texture if cursor changed
+                    if cursor.dirty {
+                        tracing::debug!("🖼️  Updating cursor texture: {}x{}", cursor.width, cursor.height);
+                        renderer.update_cursor_texture(
+                            cursor.width,
+                            cursor.height,
+                            &cursor.pixels,
+                            &mut cursor.texture_id,
+                        );
+                        cursor.dirty = false;
+                    }
+                    
+                    // Calculate cursor position (accounting for hotspot)
+                    let cursor_x = cursor.x as f32 - cursor.xhot as f32;
+                    let cursor_y = cursor.y as f32 - cursor.yhot as f32;
+                    
+                    // Render cursor texture
+                    renderer.render_cursor(
+                        cursor_x,
+                        cursor_y,
+                        cursor.width as f32,
+                        cursor.height as f32,
+                        screen_width,
+                        screen_height,
+                        cursor.texture_id,
+                    );
+                }
+            }
+            
             gl_context.swap_buffers()?;
         }
         
@@ -490,15 +542,36 @@ impl Compositor {
         self.windows.get_mut(&window_id)
     }
 
-    /// Check if any window is damaged
+    /// Check if any window is damaged or cursor moved
     pub fn any_damaged(&self) -> bool {
-        self.windows.values().any(|w| w.damaged || w.damage.is_some())
+        // Check window damage
+        let window_damaged = self.windows.values().any(|w| w.damaged || w.damage.is_some());
+        
+        // Check cursor movement (cursor should always render when it moves)
+        let cursor_moved = self.cursor_manager.as_ref()
+            .map(|c| c.has_moved())
+            .unwrap_or(false);
+        
+        window_damaged || cursor_moved
+    }
+    
+    /// Check if cursor moved (for immediate rendering, no delay)
+    pub fn cursor_moved(&self) -> bool {
+        self.cursor_manager.as_ref()
+            .map(|c| c.has_moved())
+            .unwrap_or(false)
     }
 
-    /// Clear all damage flags
-     pub fn clear_damage(&mut self) {
+    /// Clear all damage flags (including cursor movement tracking)
+    pub fn clear_damage(&mut self) {
         for window in self.windows.values_mut() {
             window.damaged = false;
+        }
+        
+        // Reset cursor movement tracking after render
+        if let Some(ref mut cursor) = self.cursor_manager {
+            cursor.prev_x = cursor.x;
+            cursor.prev_y = cursor.y;
         }
     }
 }

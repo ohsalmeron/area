@@ -229,6 +229,13 @@ impl AreaApp {
         let mut fallback_render_interval = tokio::time::interval(Duration::from_secs(1));
         fallback_render_interval.tick().await;
         
+        // Initialize cursor image on startup
+        if let Some(ref mut cursor) = self.compositor.cursor_manager {
+            if let Err(e) = cursor.update_image(&self.conn) {
+                warn!("Failed to initialize cursor image: {}", e);
+            }
+        }
+        
         loop {
             tokio::select! {
                 // Handle X11 events (blocking wait - this is the main idle point)
@@ -255,11 +262,18 @@ impl AreaApp {
                     }
                 }
                 
-                // Render when needed (damage-based)
+                // Render when needed (damage-based, but immediate for cursor)
                 _ = async {
                     if needs_render {
-                        // Small delay to batch multiple damage events
-                        tokio::time::sleep(Duration::from_millis(16)).await;
+                        // Check if cursor moved - if so, render immediately (no delay)
+                        // This ensures cursor feels responsive
+                        let cursor_moved = self.compositor.cursor_moved();
+                        
+                        if !cursor_moved {
+                            // Only window damage - small delay to batch multiple damage events
+                            tokio::time::sleep(Duration::from_millis(16)).await;
+                        }
+                        // If cursor moved, proceed immediately (no delay)
                     } else {
                         // Wait indefinitely until something needs rendering
                         std::future::pending::<()>().await
@@ -517,12 +531,15 @@ impl AreaApp {
                             }
                         }
                     } else {
-                        // Titlebar click - start drag and focus window
+                        // Titlebar click - focus window and start drag only on Button1 (left mouse button)
                         if let Err(err) = self.wm.set_focus(&self.conn, &mut self.wm_windows, window_id) {
                             warn!("Failed to focus window {}: {}", window_id, err);
                         }
-                        if let Err(err) = self.wm.start_drag(&self.conn, &self.wm_windows, window_id, e.event_x, e.event_y) {
-                            warn!("Failed to start drag for window {}: {}", window_id, err);
+                        // Only start drag on Button1 (detail == 1)
+                        if e.detail == 1 {
+                            if let Err(err) = self.wm.start_drag(&self.conn, &self.wm_windows, window_id, e.event_x, e.event_y) {
+                                warn!("Failed to start drag for window {}: {}", window_id, err);
+                            }
                         }
                     }
                 } else {
@@ -543,6 +560,11 @@ impl AreaApp {
             }
             
             Event::MotionNotify(e) => {
+                // Update cursor position (fast, no X11 round-trip)
+                if let Some(ref mut cursor) = self.compositor.cursor_manager {
+                    cursor.update_position(e.root_x, e.root_y);
+                }
+                
                 // Handle drag
                 if self.wm.is_dragging() {
                     if let Err(err) = self.wm.update_drag(&self.conn, &mut self.wm_windows, e.event_x, e.event_y) {
@@ -636,6 +658,15 @@ impl AreaApp {
                 }
             }
             
+            Event::XfixesCursorNotify(_e) => {
+                // Cursor changed - update cursor image (event-driven, not every frame!)
+                if let Some(ref mut cursor) = self.compositor.cursor_manager {
+                    if let Err(err) = cursor.update_image(&self.conn) {
+                        debug!("Failed to update cursor image: {}", err);
+                    }
+                }
+            }
+            
             _ => {
                 // Log unknown events at debug level
                 debug!("Unhandled event: {:?}", event);
@@ -665,6 +696,24 @@ impl AreaApp {
                 }
                 client.mapped = true;
             }
+            self.conn.flush()?;
+            return Ok(());
+        }
+        
+        // Check if window is override-redirect BEFORE attempting management
+        // Override-redirect windows (popups, tooltips) should not be managed by WM
+        let is_override_redirect = match self.conn.get_window_attributes(window_id)?.reply() {
+            Ok(attrs) => attrs.override_redirect,
+            Err(_) => {
+                debug!("Window {} disappeared before we could check attributes", window_id);
+                return Ok(());
+            }
+        };
+        
+        if is_override_redirect {
+            debug!("Window {} is override-redirect, skipping WM management", window_id);
+            // Still map it so it's visible, but don't manage or composite it
+            self.conn.map_window(window_id)?;
             self.conn.flush()?;
             return Ok(());
         }

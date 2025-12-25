@@ -529,6 +529,105 @@ impl Renderer {
             gl::DeleteTextures(1, &color_texture);
         }
     }
+    
+    /// Update cursor texture from pixel data
+    pub fn update_cursor_texture(
+        &self,
+        width: u16,
+        height: u16,
+        pixels: &[u32],
+        texture_id: &mut Option<u32>,
+    ) {
+        unsafe {
+            let mut tex_id = texture_id.unwrap_or(0);
+            if tex_id == 0 {
+                gl::GenTextures(1, &mut tex_id);
+                *texture_id = Some(tex_id);
+            }
+            
+            gl::BindTexture(gl::TEXTURE_2D, tex_id);
+            
+            // Upload pixel data (ARGB32 format from XFixes)
+            gl::TexImage2D(
+                gl::TEXTURE_2D,
+                0,
+                gl::RGBA as i32,
+                width as i32,
+                height as i32,
+                0,
+                gl::BGRA, // X11 ARGB32 is BGRA in OpenGL
+                gl::UNSIGNED_BYTE,
+                pixels.as_ptr() as *const _,
+            );
+            
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+            gl::BindTexture(gl::TEXTURE_2D, 0);
+        }
+    }
+    
+    /// Render cursor texture at specified position
+    pub fn render_cursor(
+        &self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        screen_width: f32,
+        screen_height: f32,
+        texture_id: Option<u32>,
+    ) {
+        unsafe {
+            // Render the texture
+            gl::UseProgram(self.program);
+            
+            // Convert screen coordinates to OpenGL normalized coordinates
+            let x_gl = (x / screen_width) * 2.0 - 1.0;
+            let y_gl = 1.0 - ((y + height) / screen_height) * 2.0;
+            let width_gl = (width / screen_width) * 2.0;
+            let height_gl = (height / screen_height) * 2.0;
+            
+            // Set uniforms
+            let pos_loc = gl::GetUniformLocation(self.program, b"uPosition\0".as_ptr() as *const _);
+            let size_loc = gl::GetUniformLocation(self.program, b"uSize\0".as_ptr() as *const _);
+            let opacity_loc = gl::GetUniformLocation(self.program, b"uOpacity\0".as_ptr() as *const _);
+            let tex_loc = gl::GetUniformLocation(self.program, b"uTexture\0".as_ptr() as *const _);
+            
+            gl::Uniform2f(pos_loc, x_gl, y_gl);
+            gl::Uniform2f(size_loc, width_gl, height_gl);
+            gl::Uniform1f(opacity_loc, 1.0);
+            
+            gl::ActiveTexture(gl::TEXTURE0);
+            if let Some(tex_id) = texture_id {
+                gl::BindTexture(gl::TEXTURE_2D, tex_id);
+            }
+            gl::Uniform1i(tex_loc, 0);
+            
+            // Render quad
+            gl::BindVertexArray(self.vao);
+            
+            let vertices: [f32; 16] = [
+                0.0, 0.0, 0.0, 1.0,
+                1.0, 0.0, 1.0, 1.0,
+                1.0, 1.0, 1.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+            ];
+            
+            gl::BindBuffer(gl::ARRAY_BUFFER, self.vbo);
+            gl::BufferData(
+                gl::ARRAY_BUFFER,
+                (vertices.len() * std::mem::size_of::<f32>()) as isize,
+                vertices.as_ptr() as *const _,
+                gl::DYNAMIC_DRAW,
+            );
+            
+            gl::DrawArrays(gl::TRIANGLE_FAN, 0, 4);
+            gl::BindVertexArray(0);
+            gl::BindTexture(gl::TEXTURE_2D, 0);
+        }
+    }
 }
 
 impl Drop for Renderer {

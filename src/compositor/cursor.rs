@@ -16,6 +16,9 @@ pub struct CursorManager {
     pub texture_id: Option<u32>,
     pub visible: bool,
     pub dirty: bool,
+    /// Previous position to detect movement (for render triggering)
+    pub prev_x: i16,
+    pub prev_y: i16,
 }
 
 impl CursorManager {
@@ -48,14 +51,38 @@ impl CursorManager {
             texture_id: None,
             visible: true,
             dirty: true,
+            prev_x: 0,
+            prev_y: 0,
         })
     }
 
-    pub fn update(&mut self, conn: &RustConnection) -> Result<()> {
+    /// Update cursor position from motion events (fast, no X11 round-trip)
+    pub fn update_position(&mut self, x: i16, y: i16) {
+        if self.x != x || self.y != y {
+            self.prev_x = self.x;
+            self.prev_y = self.y;
+            self.x = x;
+            self.y = y;
+        }
+    }
+    
+    /// Check if cursor moved (for render triggering)
+    pub fn has_moved(&self) -> bool {
+        self.x != self.prev_x || self.y != self.prev_y
+    }
+    
+    /// Update cursor image when cursor changes (event-driven, only when needed)
+    /// 
+    /// This is called only on XfixesCursorNotify events, not every frame.
+    /// Position is tracked separately via MotionNotify events for better performance.
+    /// 
+    /// Performance: This avoids the expensive X11 round-trip that was happening
+    /// 60 times per second. Now it only happens when the cursor shape actually changes.
+    pub fn update_image(&mut self, conn: &RustConnection) -> Result<()> {
         let image = conn.xfixes_get_cursor_image()?.reply()?;
         
-        // Check if cursor changed
-        if image.cursor_serial != self.serial || self.dirty {
+        // Check if cursor actually changed (cache check - avoids unnecessary texture updates)
+        if image.cursor_serial != self.serial {
             self.width = image.width;
             self.height = image.height;
             self.xhot = image.xhot;
@@ -63,10 +90,16 @@ impl CursorManager {
             self.serial = image.cursor_serial;
             self.pixels = image.cursor_image;
             self.dirty = true; // Texture needs update
+            
+            // Update position from image only on initial load (when x/y are still 0)
+            // After that, MotionNotify events provide more accurate and frequent position updates
+            // This avoids unnecessary position queries that would add latency
+            if self.x == 0 && self.y == 0 {
+                // Initial position from image (before any MotionNotify events)
+                self.x = image.x;
+                self.y = image.y;
+            }
         }
-        
-        self.x = image.x;
-        self.y = image.y;
         
         Ok(())
     }
