@@ -77,5 +77,8 @@ toml = "0.8"
 # Utilities
 dirs = { workspace = true }
 
+# Async I/O polling (for X11 events)
+mio = { version = "1.0", features = ["os-ext"] }
+
 # D-Bus (Desktop Services)
 zbus = { version = "5.0", default-features = false, features = ["tokio"] }

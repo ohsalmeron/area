@@ -8,6 +8,7 @@ mod compositor;
 mod shared;
 mod shell;
 mod dbus;
+mod x11_async;
 
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
@@ -24,8 +25,11 @@ use compositor::c_window::CWindow;
 
 /// Main application state
 struct AreaApp {
-    /// X11 connection
+    /// X11 connection (Arc for sharing across threads)
     conn: Arc<x11rb::rust_connection::RustConnection>,
+    
+    /// X11 async event stream (non-blocking polling)
+    x11_stream: x11_async::X11EventStream,
     
     /// Root window
     root: u32,
@@ -76,7 +80,7 @@ impl AreaApp {
             .context("Failed to connect to X server")?;
         
         let conn = Arc::new(conn);
-        let screen = &conn.setup().roots[screen_num];
+        let screen = &conn.as_ref().setup().roots[screen_num];
         let root = screen.root;
         let screen_width = screen.width_in_pixels;
         let screen_height = screen.height_in_pixels;
@@ -84,16 +88,21 @@ impl AreaApp {
         info!("Connected to X server, screen {}, root window {}", screen_num, root);
         info!("Screen size: {}x{}", screen_width, screen_height);
         
+        // Initialize X11 async event stream (non-blocking polling)
+        let x11_stream = x11_async::X11EventStream::new(conn.clone())
+            .context("Failed to initialize X11 event stream")?;
+        info!("X11 async event stream initialized");
+        
         // Initialize window manager
         let wm = wm::WindowManager::new(&conn, screen_num, root, replace)
             .context("Failed to initialize window manager")?;
         
-        // Initialize compositor
-        let compositor = compositor::Compositor::new(&conn, screen_num, root)
-            .context("Failed to initialize compositor")?;
-        
         // Initialize shell
         let shell = shell::Shell::new(screen_width, screen_height);
+        
+        // Initialize compositor (spawns in separate thread)
+        let compositor = compositor::Compositor::spawn(conn.clone(), screen_num, root)
+            .context("Failed to initialize compositor")?;
         
         // Initialize D-Bus (optional, won't fail if D-Bus unavailable)
         let dbus = match dbus::DbusManager::new().await {
@@ -132,16 +141,9 @@ impl AreaApp {
             None
         };
         
-        // Show startup notification
-        if let Some(ref notif) = notifications {
-            let _ = notif.show_simple(
-                "Area Started",
-                "Window manager and compositor ready"
-            ).await;
-        }
-        
         let mut app = Self {
-            conn,
+            conn: conn.clone(),
+            x11_stream,
             root,
             wm_windows: HashMap::new(),
             wm,
@@ -157,6 +159,14 @@ impl AreaApp {
             frame_windows: HashSet::new(),
         };
         
+        // Show startup notification
+        if let Some(ref notif) = app._notifications {
+            let _ = notif.show_simple(
+                "Area Started",
+                "Window manager and compositor ready"
+            ).await;
+        }
+        
         // Scan for existing windows
         app.scan_existing_windows()?;
         
@@ -166,7 +176,7 @@ impl AreaApp {
     /// Scan for existing windows and manage them
     /// This restores windows that were open before area restarted
     fn scan_existing_windows(&mut self) -> Result<()> {
-        let tree = self.conn.query_tree(self.root)?.reply()?;
+        let tree = self.conn.as_ref().query_tree(self.root)?.reply()?;
         
         info!("Scanning {} existing windows for restoration", tree.children.len());
         
@@ -180,7 +190,7 @@ impl AreaApp {
             }
             
             // Get window attributes to check if it's a valid window to manage
-            if let Ok(attrs) = self.conn.get_window_attributes(window_id)?.reply() {
+            if let Ok(attrs) = self.conn.as_ref().get_window_attributes(window_id)?.reply() {
                 // Skip override-redirect windows (popups, tooltips, etc.)
                 if attrs.override_redirect {
                     debug!("Skipping override-redirect window {}", window_id);
@@ -213,13 +223,14 @@ impl AreaApp {
         Ok(())
     }
     
-    /// Main event loop
+    /// Main event loop (LeftWM pattern with event buffering)
     async fn run(mut self) -> Result<()> {
         info!("Starting main event loop");
+        info!("Overlay window ID: {}", self.compositor.overlay_window);
         
-        // Use damage-based rendering: only render when windows are damaged
-        // This allows idle at 0% CPU when nothing changes
-        let mut needs_render = true; // Render once at startup
+        // Event buffer for batching events (LeftWM pattern)
+        let mut event_buffer: Vec<Event> = Vec::new();
+        let mut needs_render = false; // Will be set to true when events require rendering
         
         // Periodic scan for unmanaged windows (every 2 seconds)
         let mut scan_interval = tokio::time::interval(Duration::from_secs(2));
@@ -229,61 +240,54 @@ impl AreaApp {
         let mut fallback_render_interval = tokio::time::interval(Duration::from_secs(1));
         fallback_render_interval.tick().await;
         
-        // Initialize cursor image on startup
-        if let Some(ref mut cursor) = self.compositor.cursor_manager {
-            if let Err(e) = cursor.update_image(&self.conn) {
-                warn!("Failed to initialize cursor image: {}", e);
-            }
-        }
+        // Performance monitoring: log FPS and frame timing every 5 seconds
+        let mut perf_log_interval = tokio::time::interval(Duration::from_secs(5));
+        perf_log_interval.tick().await;
+        
+        // Trigger initial render (compositor handles rendering in its own thread)
+        self.compositor.trigger_render();
         
         loop {
+            // Flush X11 requests at start of loop (LeftWM pattern - batch optimization)
+            if let Err(e) = self.x11_stream.flush() {
+                warn!("Failed to flush X11 requests: {}", e);
+            }
+            
+            // Process buffered events first if available (LeftWM pattern)
+            if !event_buffer.is_empty() {
+                self.execute_events(&mut event_buffer, &mut needs_render).await;
+                continue;
+            }
+            
             tokio::select! {
-                // Handle X11 events (blocking wait - this is the main idle point)
-                event_result = tokio::task::spawn_blocking({
-                    let conn = self.conn.clone();
-                    move || conn.wait_for_event()
-                }) => {
-                    match event_result {
-                        Ok(Ok(event)) => {
-                            if let Err(e) = self.handle_event(event).await {
-                                error!("Error handling event: {}", e);
+                // Wait for X11 events (only when buffer is empty)
+                () = self.x11_stream.wait_readable() => {
+                    // Collect all pending events (non-blocking loop)
+                    loop {
+                        match self.x11_stream.poll_next_event() {
+                            Ok(Some(event)) => event_buffer.push(event),
+                            Ok(None) => break,
+                            Err(e) => {
+                                error!("Error polling for X11 events: {}", e);
+                                break;
                             }
-                            // After handling event, check if we need to render
-                            needs_render = self.compositor.any_damaged();
-                        }
-                        Ok(Err(e)) => {
-                            error!("Error receiving X11 event: {}", e);
-                            break;
-                        }
-                        Err(e) => {
-                            error!("Task join error: {}", e);
-                            break;
                         }
                     }
+                    // Process events in next iteration
                 }
                 
                 // Render when needed (damage-based, but immediate for cursor)
                 _ = async {
                     if needs_render {
-                        // Check if cursor moved - if so, render immediately (no delay)
-                        // This ensures cursor feels responsive
-                        let cursor_moved = self.compositor.cursor_moved();
-                        
-                        if !cursor_moved {
-                            // Only window damage - small delay to batch multiple damage events
-                            tokio::time::sleep(Duration::from_millis(16)).await;
-                        }
-                        // If cursor moved, proceed immediately (no delay)
+                        // Small delay to batch multiple damage events
+                        tokio::time::sleep(Duration::from_millis(16)).await;
                     } else {
                         // Wait indefinitely until something needs rendering
                         std::future::pending::<()>().await
                     }
                 }, if needs_render => {
-                    if let Err(e) = self.render_frame() {
-                        error!("Error rendering frame: {}", e);
-                    }
-                    // Clear damage flags after rendering
-                    self.compositor.clear_damage();
+                    // Trigger render in compositor thread
+                    self.compositor.trigger_render();
                     needs_render = false;
                 }
                 
@@ -291,12 +295,22 @@ impl AreaApp {
                 _ = fallback_render_interval.tick() => {
                     // Only render if there are animations or if we haven't rendered recently
                     if needs_render {
-                        if let Err(e) = self.render_frame() {
-                            error!("Error rendering frame: {}", e);
-                        }
-                        // Clear damage flags after rendering
-                        self.compositor.clear_damage();
+                        self.compositor.trigger_render();
                         needs_render = false;
+                    }
+                }
+                
+                // Performance monitoring: log FPS and frame timing
+                _ = perf_log_interval.tick() => {
+                    let now = Instant::now();
+                    let frame_delta = now.duration_since(self.last_frame);
+                    self.last_frame = now;
+                    
+                    // Log performance metrics (FPS from compositor, frame timing)
+                    if frame_delta.as_secs_f64() > 0.0 {
+                        let avg_fps = 1.0 / frame_delta.as_secs_f64();
+                        debug!("Performance: avg_frame_time={:.2}ms, compositor_fps={:.1}", 
+                            frame_delta.as_secs_f64() * 1000.0, avg_fps);
                     }
                 }
                 
@@ -306,15 +320,28 @@ impl AreaApp {
                         debug!("Error scanning for unmanaged windows: {}", e);
                     }
                 }
-            }
+            };
         }
-        
-        Ok(())
+    }
+    
+    /// Execute buffered events (LeftWM drain pattern)
+    async fn execute_events(&mut self, event_buffer: &mut Vec<Event>, needs_render: &mut bool) {
+        // Process all buffered events at once (LeftWM drain pattern)
+        // Note: We process events sequentially to maintain order and state consistency
+        for event in event_buffer.drain(..) {
+            if let Err(e) = self.handle_event(event).await {
+                error!("Error handling event: {}", e);
+            }
+            // Mark that we need to render (compositor will check damage internally)
+            // Note: needs_render is set to true here, but we also check compositor damage
+            // The compositor thread handles its own rendering, so we just trigger it
+            *needs_render = true;
+        }
     }
     
     /// Scan for windows that exist but aren't being managed
     fn scan_for_unmanaged_windows(&mut self) -> Result<()> {
-        let tree = self.conn.query_tree(self.root)?.reply()?;
+        let tree = self.conn.as_ref().query_tree(self.root)?.reply()?;
         
         // Collect window IDs to manage (to avoid borrow checker issues)
         let mut windows_to_manage = Vec::new();
@@ -331,7 +358,7 @@ impl AreaApp {
             }
             
             // Check if it's a valid window to manage
-            if let Ok(attrs) = self.conn.get_window_attributes(window_id)?.reply() {
+            if let Ok(attrs) = self.conn.as_ref().get_window_attributes(window_id)?.reply() {
                 // Skip override-redirect windows
                 if attrs.override_redirect {
                     continue;
@@ -365,6 +392,19 @@ impl AreaApp {
     
     /// Handle an X11 event
     async fn handle_event(&mut self, event: Event) -> Result<()> {
+        // Check for screen size changes (detect via root window geometry)
+        let current_screen = &self.conn.as_ref().setup().roots[0];
+        let current_width = current_screen.width_in_pixels;
+        let current_height = current_screen.height_in_pixels;
+        if current_width != self.screen_width || current_height != self.screen_height {
+            info!("Screen size changed: {}x{} -> {}x{}", 
+                self.screen_width, self.screen_height, current_width, current_height);
+            self.screen_width = current_width;
+            self.screen_height = current_height;
+            // Update shell with new screen size
+            self.shell.set_screen_size(current_width, current_height);
+        }
+        
         match event {
             Event::MapRequest(e) => {
                 info!("⭐ MapRequest for window {}", e.window);
@@ -407,7 +447,7 @@ impl AreaApp {
                         .sibling(e.sibling)
                         .stack_mode(e.stack_mode),
                 )?;
-                self.conn.flush()?;
+                self.conn.as_ref().flush()?;
                 
                 // Update geometry if window is already managed
                 if let Some(client) = self.wm_windows.get_mut(&e.window) {
@@ -441,7 +481,7 @@ impl AreaApp {
                 let window_id = e.window;
                 if window_id != self.compositor.overlay_window && !self.wm_windows.contains_key(&window_id) {
                     // Check if window is override-redirect
-                    let should_manage = match self.conn.get_window_attributes(window_id)?.reply() {
+                    let should_manage = match self.conn.as_ref().get_window_attributes(window_id)?.reply() {
                         Ok(attrs) => !attrs.override_redirect,
                         Err(_) => false,
                     };
@@ -560,10 +600,8 @@ impl AreaApp {
             }
             
             Event::MotionNotify(e) => {
-                // Update cursor position (fast, no X11 round-trip)
-                if let Some(ref mut cursor) = self.compositor.cursor_manager {
-                    cursor.update_position(e.root_x, e.root_y);
-                }
+                // Update cursor position in compositor
+                self.compositor.update_cursor(e.root_x, e.root_y, true);
                 
                 // Handle drag
                 if self.wm.is_dragging() {
@@ -576,42 +614,25 @@ impl AreaApp {
             Event::Expose(e) => {
                 debug!("Expose for window {}", e.window);
                 // Mark window as damaged
-                if let Some(window) = self.compositor.get_window_mut(e.window) {
-                    window.damaged = true;
-                }
+                // Mark window as damaged in the compositor
+                self.compositor.update_window_damage(e.window);
             }
             
             Event::DamageNotify(e) => {
-                // Handle Damage extension events - window content has changed
-                debug!("🔴 DamageNotify for drawable {} (damage {}, level {:?})", e.drawable, e.damage, e.level);
-                
-                // Try to find and mark window as damaged
-                let found = if let Some(window) = self.compositor.get_window_mut(e.drawable) {
-                    window.damaged = true;
-                    debug!("✅ Marked window {} as damaged (damage ID {}, drawable {})", window.id, e.damage, e.drawable);
-                    true
-                } else {
-                    false
-                };
-                if !found {
-                    // Damage events for destroyed windows are expected - downgrade to trace
-                    use tracing::trace;
-                    trace!("DamageNotify for unknown window (damage {}, drawable {})", e.damage, e.drawable);
-                }
+                // Inform compositor of new damage
+                self.compositor.update_window_damage(e.drawable);
             }
             
             Event::ConfigureNotify(e) => {
                 // Sync CWindow geometry when window is resized/moved
-                if let Some(c_window) = self.compositor.get_window_mut(e.window) {
-                    c_window.geometry = shared::Geometry::new(
-                        e.x as i32,
-                        e.y as i32,
-                        e.width as u32,
-                        e.height as u32
-                    );
-                    c_window.border_width = e.border_width;
-                    c_window.damaged = true; // Repaint after resize
-                }
+                // Sync CWindow geometry when window is resized/moved
+                let geom = shared::Geometry::new(
+                    e.x as i32,
+                    e.y as i32,
+                    e.width as u32,
+                    e.height as u32
+                );
+                self.compositor.update_window_geometry(e.window, geom);
             }
             
             Event::KeyPress(e) => {
@@ -659,12 +680,7 @@ impl AreaApp {
             }
             
             Event::XfixesCursorNotify(_e) => {
-                // Cursor changed - update cursor image (event-driven, not every frame!)
-                if let Some(ref mut cursor) = self.compositor.cursor_manager {
-                    if let Err(err) = cursor.update_image(&self.conn) {
-                        debug!("Failed to update cursor image: {}", err);
-                    }
-                }
+                // Handled in compositor thread
             }
             
             _ => {
@@ -689,20 +705,20 @@ impl AreaApp {
                     if let Some(frame) = &client.frame {
                         self.conn.map_window(frame.frame)?;
                     } else {
-                        self.conn.map_window(window_id)?;
+                        self.conn.as_ref().map_window(window_id)?;
                     }
                 } else {
-                    self.conn.map_window(window_id)?;
+                    self.conn.as_ref().map_window(window_id)?;
                 }
                 client.mapped = true;
             }
-            self.conn.flush()?;
+            self.conn.as_ref().flush()?;
             return Ok(());
         }
         
         // Check if window is override-redirect BEFORE attempting management
         // Override-redirect windows (popups, tooltips) should not be managed by WM
-        let is_override_redirect = match self.conn.get_window_attributes(window_id)?.reply() {
+        let is_override_redirect = match self.conn.as_ref().get_window_attributes(window_id)?.reply() {
             Ok(attrs) => attrs.override_redirect,
             Err(_) => {
                 debug!("Window {} disappeared before we could check attributes", window_id);
@@ -713,8 +729,8 @@ impl AreaApp {
         if is_override_redirect {
             debug!("Window {} is override-redirect, skipping WM management", window_id);
             // Still map it so it's visible, but don't manage or composite it
-            self.conn.map_window(window_id)?;
-            self.conn.flush()?;
+            self.conn.as_ref().map_window(window_id)?;
+            self.conn.as_ref().flush()?;
             return Ok(());
         }
         
@@ -722,7 +738,7 @@ impl AreaApp {
         let mut client = Client::new(window_id, shared::Geometry::new(0, 0, 100, 100));
         
         // Check if window was already mapped before we took over
-        let was_mapped = match self.conn.get_window_attributes(window_id)?.reply() {
+        let was_mapped = match self.conn.as_ref().get_window_attributes(window_id)?.reply() {
             Ok(attrs) => attrs.map_state != x11rb::protocol::xproto::MapState::UNMAPPED,
             Err(_) => {
                 debug!("Window {} disappeared before management started", window_id);
@@ -766,22 +782,22 @@ impl AreaApp {
             client.mapped = true;
             debug!("Mapped new window {}", window_id);
         }
-        self.conn.flush()?;
+        self.conn.as_ref().flush()?;
         
         // Raise window to ensure it's visible (bring to front)
         use x11rb::protocol::xproto::StackMode;
         if let Some(frame) = &client.frame {
-            self.conn.configure_window(
+            self.conn.as_ref().configure_window(
                 frame.frame,
                 &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
             )?;
         } else {
-            self.conn.configure_window(
+            self.conn.as_ref().configure_window(
                 window_id,
                 &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
             )?;
         }
-        self.conn.flush()?;
+        self.conn.as_ref().flush()?;
         
         // Let compositor register the window (creates texture, damage tracking)
         // Determine composite target (FRAME or CLIENT)
@@ -790,8 +806,8 @@ impl AreaApp {
         // Get actual geometry, border width and viewable state from X11
         // We use *actual* X11 geometry because pixmap size matches the real window size
         let (geometry, border_width, viewable) = {
-            let geom_result = self.conn.get_geometry(composite_id)?.reply();
-            let attr_result = self.conn.get_window_attributes(composite_id)?.reply();
+            let geom_result = self.conn.as_ref().get_geometry(composite_id)?.reply();
+            let attr_result = self.conn.as_ref().get_window_attributes(composite_id)?.reply();
             
             match (geom_result, attr_result) {
                 (Ok(geom), Ok(attr)) => (
@@ -822,9 +838,7 @@ impl AreaApp {
             viewable
         );
 
-        if let Err(e) = self.compositor.add_window(&self.conn, c_window) {
-            warn!("Failed to add window {} to compositor: {}. Window will still be managed.", window_id, e);
-        }
+        self.compositor.add_window(c_window);
         
         // Store window
         self.wm_windows.insert(window_id, client);
@@ -850,7 +864,7 @@ impl AreaApp {
             }
             
             // Let compositor clean up
-            self.compositor.remove_window(&self.conn, window_id)?;
+            self.compositor.remove_window(window_id);
             
             // Let WM clean up (this will reparent window back to root)
             self.wm.unmanage_window(&self.conn, &mut client)?;
@@ -860,35 +874,7 @@ impl AreaApp {
         Ok(())
     }
     
-    /// Render a frame
-    fn render_frame(&mut self) -> Result<()> {
-        let now = Instant::now();
-        let _delta_time = (now - self.last_frame).as_secs_f32();
-        self.last_frame = now;
-        
-
-        
-        // Update shell
-        self.shell.update();
-        
-        // Update shell screen size if needed
-        self.shell.logout_dialog.set_screen_size(self.screen_width, self.screen_height);
-        
-        // NOTE: CWindow geometry is synced via ConfigureNotify events
-        // The pixmap validation also updates geometry from X11 when binding
-
-        // Render all windows and shell
-        self.compositor.render(&self.conn, &self.shell, self.screen_width as f32, self.screen_height as f32)?;
-        
-        // Log FPS every 60 frames
-        static FRAME_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let count = FRAME_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if count % 60 == 0 {
-            debug!("FPS: {:.2}", self.compositor.fps());
-        }
-        
-        Ok(())
-    }
+    // render_frame is removed, rendering is now managed by the compositor thread actor
 }
 
 #[tokio::main]
@@ -911,9 +897,52 @@ async fn main() -> Result<()> {
         info!("--replace flag detected: will attempt to replace existing WM");
     }
     
+    // Setup signal handlers for graceful shutdown
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+    
+    // Handle SIGTERM and SIGINT
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())?;
+        let mut sigint = signal(SignalKind::interrupt())?;
+        let tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM, shutting down gracefully");
+                    let _ = tx.send(()).await;
+                }
+                _ = sigint.recv() => {
+                    info!("Received SIGINT, shutting down gracefully");
+                    let _ = tx.send(()).await;
+                }
+            }
+        });
+    }
+    
     // Create and run application
-    let app = AreaApp::new(replace).await?;
-    app.run().await?;
+    let mut app = AreaApp::new(replace).await?;
+    
+    // Get compositor handle before moving app into run()
+    let compositor_handle = app.compositor.clone();
+    
+    // Run app with shutdown handling
+    tokio::select! {
+        result = app.run() => {
+            if let Err(e) = result {
+                error!("Application error: {}", e);
+                return Err(e);
+            }
+        }
+        _ = shutdown_rx.recv() => {
+            info!("Shutdown signal received, cleaning up...");
+            // Send shutdown command to compositor
+            compositor_handle.shutdown();
+            // Give compositor time to clean up
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
     
     Ok(())
 }

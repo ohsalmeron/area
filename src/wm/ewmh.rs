@@ -27,6 +27,7 @@ pub struct Atoms {
     pub _net_wm_state_fullscreen: Atom,
     pub _net_wm_state_maximized_vert: Atom,
     pub _net_wm_state_maximized_horz: Atom,
+    pub net_frame_extents: Atom,
     pub _net_close_window: Atom,
     pub _wm_protocols: Atom,
     pub _wm_delete_window: Atom,
@@ -56,6 +57,7 @@ impl Atoms {
             _net_wm_state_fullscreen: intern("_NET_WM_STATE_FULLSCREEN")?,
             _net_wm_state_maximized_vert: intern("_NET_WM_STATE_MAXIMIZED_VERT")?,
             _net_wm_state_maximized_horz: intern("_NET_WM_STATE_MAXIMIZED_HORZ")?,
+            net_frame_extents: intern("_NET_FRAME_EXTENTS")?,
             _net_close_window: intern("_NET_CLOSE_WINDOW")?,
             _wm_protocols: intern("WM_PROTOCOLS")?,
             _wm_delete_window: intern("WM_DELETE_WINDOW")?,
@@ -79,6 +81,7 @@ impl Atoms {
             self.net_wm_desktop,
             self.net_wm_window_type,
             self.net_wm_state,
+            self.net_frame_extents,
         ];
 
         conn.change_property32(
@@ -107,6 +110,26 @@ impl Atoms {
             self.net_active_window,
             AtomEnum::WINDOW,
             &[win],
+        )?;
+        Ok(())
+    }
+
+    /// Update _NET_FRAME_EXTENTS for a window
+    pub fn update_frame_extents<C: Connection>(
+        &self,
+        conn: &C,
+        window: Window,
+        left: u32,
+        right: u32,
+        top: u32,
+        bottom: u32,
+    ) -> Result<()> {
+        conn.change_property32(
+            PropMode::REPLACE,
+            window,
+            self.net_frame_extents,
+            AtomEnum::CARDINAL,
+            &[left, right, top, bottom],
         )?;
         Ok(())
     }

@@ -155,5 +155,16 @@ impl Panel {
         let fy = y as f32;
         fy >= panel_y && fy < panel_y + PANEL_HEIGHT
     }
+    
+    /// Update screen size (called when screen resolution changes)
+    pub fn set_screen_size(&mut self, width: u16, height: u16) {
+        self.screen_width = width;
+        self.screen_height = height;
+        
+        // Recalculate button positions
+        let y = if self.position_top { 0.0 } else { height as f32 - PANEL_HEIGHT };
+        self.logout_button_x = width as f32 - BUTTON_WIDTH - BUTTON_PADDING;
+        self.logout_button_y = y + (PANEL_HEIGHT - BUTTON_HEIGHT) / 2.0;
+    }
 }
 

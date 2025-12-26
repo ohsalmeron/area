@@ -49,6 +49,12 @@ impl Shell {
         self.panel.update();
         self.logout_dialog.update();
     }
+    
+    /// Update screen size (called when screen resolution changes)
+    pub fn set_screen_size(&mut self, width: u16, height: u16) {
+        self.panel.set_screen_size(width, height);
+        self.logout_dialog.set_screen_size(width, height);
+    }
 }
 
 

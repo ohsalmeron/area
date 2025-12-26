@@ -428,6 +428,12 @@ impl WindowManager {
         conn.flush()?;
         
         debug!("WM: Managed window {} ({})", client.id, client.title);
+        
+        // Update _NET_FRAME_EXTENTS so client knows about our decorations
+        // Currently hardcoded based on our hardcoded decoration sizes
+        // Top: 32 (Titlebar), Left/Right/Bottom: 2 (Border)
+        let _ = self.atoms.update_frame_extents(conn, client.id, 2, 2, 32, 2);
+        
         Ok(())
     }
     

@@ -43,6 +43,11 @@ impl FpsCounter {
     pub fn fps(&self) -> f64 {
         self.current_fps
     }
+    
+    /// Get the current frame count (for periodic logging)
+    pub fn frame_count(&self) -> u32 {
+        self.frame_count
+    }
 }
 
 impl Default for FpsCounter {
