@@ -268,25 +268,38 @@ impl CompositorInner {
             }
             CompositorCommand::RemoveWindow(id) => {
                 if let Some(w) = self.windows.remove(&id) {
+                    // Clean up damage object
                     if let Some(d) = w.damage {
                         let _ = self.conn.as_ref().damage_destroy(d);
                     }
+                    
+                    // Free X11 pixmap if it exists
+                    if let Some(pixmap) = w.pixmap {
+                        let _ = self.conn.as_ref().free_pixmap(pixmap);
+                    }
+                    
+                    // Remove texture from renderer (clean up GLX pixmap and OpenGL texture)
+                    if let (Some(gl_ctx), Some(renderer)) = (&mut self.gl_context, &mut self.renderer) {
+                        renderer.remove_texture(gl_ctx, id);
+                    }
+                    
+                    debug!("Removed window {} from compositor (cleaned up damage, pixmap, and texture)", id);
                 }
             }
             CompositorCommand::UpdateWindowGeometry(id, geom) => {
                 if let Some(w) = self.windows.get_mut(&id) {
                     // Check if size changed significantly (more than 10% change)
-                    let old_extents = w.extents();
-                    let new_extents = Geometry {
-                        x: geom.x,
-                        y: geom.y,
+                    let old_outer = w.outer_geometry();
+                    let new_outer = Geometry {
+                        x: geom.x - w.border_width as i32,
+                        y: geom.y - w.border_width as i32,
                         width: geom.width + (w.border_width as u32) * 2,
                         height: geom.height + (w.border_width as u32) * 2,
                     };
                     
                     let size_changed_significantly = 
-                        (old_extents.width as f32 - new_extents.width as f32).abs() / old_extents.width.max(1) as f32 > 0.1 ||
-                        (old_extents.height as f32 - new_extents.height as f32).abs() / old_extents.height.max(1) as f32 > 0.1;
+                        (old_outer.width as f32 - new_outer.width as f32).abs() / old_outer.width.max(1) as f32 > 0.1 ||
+                        (old_outer.height as f32 - new_outer.height as f32).abs() / old_outer.height.max(1) as f32 > 0.1;
                     
                     // If size changed significantly, remove texture to force recreation
                     if size_changed_significantly {
@@ -493,8 +506,8 @@ impl CompositorInner {
                                         continue;
                                     }
                                     
-                                    let extent = window.extents();
-                                    if pixmap_geom.width != extent.width as u16 || pixmap_geom.height != extent.height as u16 {
+                                    let outer = window.outer_geometry();
+                                    if pixmap_geom.width != outer.width as u16 || pixmap_geom.height != outer.height as u16 {
                                         let _ = conn.free_pixmap(pixmap);
                                         continue;
                                     }

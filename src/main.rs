@@ -558,9 +558,9 @@ impl AreaApp {
             }
             
             Event::ButtonPress(e) => {
-                // Check if click is on panel
-                if self.shell.panel.contains_point(e.event_x, e.event_y) {
-                    if let Err(err) = self.shell.panel.handle_click(e.event_x, e.event_y, &mut self.shell.logout_dialog) {
+                // Check if click is on panel (using root coordinates)
+                if self.shell.panel.contains_point(e.root_x, e.root_y) {
+                    if let Err(err) = self.shell.panel.handle_click(e.root_x, e.root_y, &mut self.shell.logout_dialog) {
                         warn!("Error handling panel click: {}", err);
                     }
                     return Ok(());
@@ -650,7 +650,7 @@ impl AreaApp {
                                 }
                             }
                             wm::ButtonType::Maximize => {
-                                if let Err(err) = self.wm.toggle_maximize(&self.conn, &mut self.wm_windows, window_id) {
+                                if let Err(err) = self.wm.toggle_maximize(&self.conn, &mut self.wm_windows, window_id, self.shell.panel.height() as u32) {
                                     error!("Failed to toggle maximize window {}: {}", window_id, err);
                                 }
                             }
@@ -691,12 +691,24 @@ impl AreaApp {
             }
             
             Event::DamageNotify(e) => {
-                // Inform compositor of new damage
-                self.compositor.update_window_damage(e.drawable);
+                // If this is a managed client window with a frame, inform compositor about frame damage
+                let target_id = if let Some(client) = self.wm_windows.get(&e.drawable) {
+                    client.frame.as_ref().map(|f| f.frame).unwrap_or(e.drawable)
+                } else {
+                    e.drawable
+                };
+                self.compositor.update_window_damage(target_id);
             }
             
             Event::ConfigureNotify(e) => {
-                // Sync CWindow geometry when window is resized/moved
+                // If this is a managed client window with a frame, ignore its ConfigureNotify
+                // because it's in relative coordinates. Frame's ConfigureNotify will update geometry.
+                if let Some(client) = self.wm_windows.get(&e.window) {
+                    if client.frame.is_some() {
+                        return Ok(());
+                    }
+                }
+
                 // Sync CWindow geometry when window is resized/moved
                 let geom = shared::Geometry::new(
                     e.x as i32,
@@ -763,7 +775,14 @@ impl AreaApp {
                     if e.atom == reply.atom {
                         // Window state changed - check for fullscreen
                         debug!("PropertyNotify: _NET_WM_STATE changed for window {}", e.window);
-                        self.compositor.update_window_state(e.window);
+                        
+                        // Use frame ID if managed and framed
+                        let target_id = if let Some(client) = self.wm_windows.get(&e.window) {
+                            client.frame.as_ref().map(|f| f.frame).unwrap_or(e.window)
+                        } else {
+                            e.window
+                        };
+                        self.compositor.update_window_state(target_id);
                     }
                 }
             }
@@ -984,7 +1003,8 @@ impl AreaApp {
             }
             
             // Let compositor clean up
-            self.compositor.remove_window(window_id);
+            let composite_id = client.frame.as_ref().map(|f| f.frame).unwrap_or(window_id);
+            self.compositor.remove_window(composite_id);
             
             // Let WM clean up (this will reparent window back to root)
             self.wm.unmanage_window(&self.conn, &mut client)?;

@@ -523,6 +523,7 @@ impl WindowManager {
         conn: &RustConnection,
         windows: &mut HashMap<u32, Client>,
         window_id: u32,
+        top_offset: u32,
     ) -> Result<()> {
         let client = windows.get_mut(&window_id)
             .context("Window not found")?;
@@ -530,7 +531,7 @@ impl WindowManager {
         if client.state.maximized {
             self.restore_window(conn, client)?;
         } else {
-            self.maximize_window(conn, client)?;
+            self.maximize_window(conn, client, top_offset)?;
         }
         
         Ok(())
@@ -541,11 +542,14 @@ impl WindowManager {
         &mut self,
         conn: &RustConnection,
         client: &mut Client,
+        top_offset: u32,
     ) -> Result<()> {
         info!("Maximizing window {}", client.id);
         
         // Save restore geometry
-        client.restore_geometry = Some(client.geometry);
+        if !client.state.maximized {
+            client.restore_geometry = Some(client.geometry);
+        }
         
         // Get screen size
         let screen = &conn.setup().roots[self.screen_num];
@@ -555,86 +559,51 @@ impl WindowManager {
         // Account for decorations (titlebar height + borders)
         const TITLEBAR_HEIGHT: u32 = 32;
         const BORDER_WIDTH: u32 = 2;
-        let client_width = max_width - (BORDER_WIDTH * 2);
-        let client_height = max_height - TITLEBAR_HEIGHT - (BORDER_WIDTH * 2);
         
-        // Update window geometry
+        // Final frame outer geometry: (0, top_offset, max_width, max_height - top_offset)
+        // Internal size of the frame:
+        let frame_width = max_width - (BORDER_WIDTH * 2);
+        let frame_height = max_height - top_offset - (BORDER_WIDTH * 2);
+        
+        // Update window geometry (client relative to root)
         client.geometry.x = BORDER_WIDTH as i32;
-        client.geometry.y = TITLEBAR_HEIGHT as i32;
-        client.geometry.width = client_width;
-        client.geometry.height = client_height;
+        client.geometry.y = (top_offset + BORDER_WIDTH + TITLEBAR_HEIGHT) as i32;
+        client.geometry.width = frame_width;
+        client.geometry.height = frame_height - TITLEBAR_HEIGHT;
+        client.state.maximized = true;
         
         // Resize frame and client window
-        if let Some(frame) = &client.frame {
-            // Resize frame
-            conn.configure_window(
-                frame.frame,
-                &ConfigureWindowAux::new()
-                    .x(BORDER_WIDTH as i32)
-                    .y(0)
-                    .width(max_width)
-                    .height(max_height),
-            )?;
+        if let Some(frame_state) = &client.frame {
+            let frame = decorations::WindowFrame::from_state(client.id, frame_state);
             
-            // Resize titlebar
-            conn.configure_window(
-                frame.titlebar,
-                &ConfigureWindowAux::new().width(max_width),
-            )?;
-            
-            // Resize client window
-            conn.configure_window(
-                client.id,
-                &ConfigureWindowAux::new()
-                    .width(client_width)
-                    .height(client_height),
-            )?;
-            
-            // Reposition buttons
-            let close_x = max_width - 16 - 8; // BUTTON_SIZE - BUTTON_PADDING
-            let max_x = close_x - 16 - 8;
-            let min_x = max_x - 16 - 8;
-            let _btn_y = (TITLEBAR_HEIGHT - 16) / 2;
-            
-            conn.configure_window(
-                frame.close_button,
-                &ConfigureWindowAux::new().x(close_x as i32),
-            )?;
-            conn.configure_window(
-                frame.maximize_button,
-                &ConfigureWindowAux::new().x(max_x as i32),
-            )?;
-            conn.configure_window(
-                frame.minimize_button,
-                &ConfigureWindowAux::new().x(min_x as i32),
-            )?;
+            // Move frame so its border is flush with screen edge
+            // Outer X = x - BORDER_WIDTH = 0 => x = BORDER_WIDTH
+            // Outer Y = y - BORDER_WIDTH = top_offset => y = top_offset + BORDER_WIDTH
+            frame.move_to(conn, BORDER_WIDTH as i16, (top_offset + BORDER_WIDTH) as i16)?;
+            frame.resize(conn, frame_width as u16, (frame_height - TITLEBAR_HEIGHT) as u16)?;
         } else {
             // No frame, resize client directly
             conn.configure_window(
                 client.id,
                 &ConfigureWindowAux::new()
                     .x(0)
-                    .y(0)
+                    .y(top_offset as i32)
                     .width(max_width)
-                    .height(max_height),
+                    .height(max_height - top_offset),
             )?;
             client.geometry.x = 0;
-            client.geometry.y = 0;
+            client.geometry.y = top_offset as i32;
             client.geometry.width = max_width;
-            client.geometry.height = max_height;
+            client.geometry.height = max_height - top_offset;
         }
         
-        // Update flags
-        client.state.maximized = true;
-        
         // Update EWMH state
-        self.atoms.set_window_state(
-            conn,
-            client.id,
-            &[self.atoms._net_wm_state_maximized_vert, 
-              self.atoms._net_wm_state_maximized_horz],
-            &[],
-        )?;
+        if let Err(e) = self.atoms.set_window_state(conn, client.id, &[
+            self.atoms._net_wm_state_maximized_vert,
+            self.atoms._net_wm_state_maximized_horz,
+        ], &[]) {
+            warn!("Failed to update maximized state for window {}: {}", client.id, e);
+        }
         
         conn.flush()?;
         Ok(())
@@ -792,7 +761,7 @@ impl WindowManager {
             GrabMode::ASYNC,
             GrabMode::ASYNC,
             self.root, // confine_to window
-            self.root, // cursor (use root's cursor)
+            0u32, // cursor (NONE = use current cursor)
             x11rb::CURRENT_TIME,
         );
         

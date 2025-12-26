@@ -62,10 +62,10 @@ impl CWindow {
     }
 
     /// Calculate the window's total bounding box (includes X11 border width)
-    pub fn extents(&self) -> Geometry {
+    pub fn outer_geometry(&self) -> Geometry {
         Geometry {
-            x: self.geometry.x,
-            y: self.geometry.y,
+            x: self.geometry.x - self.border_width as i32,
+            y: self.geometry.y - self.border_width as i32,
             width: self.geometry.width + (self.border_width as u32) * 2,
             height: self.geometry.height + (self.border_width as u32) * 2,
         }
@@ -73,10 +73,10 @@ impl CWindow {
 
     /// Check if the window is currently covering the entire screen
     pub fn is_fullscreen(&self, screen_width: u16, screen_height: u16) -> bool {
-        let ext = self.extents();
-        ext.x <= 0
-            && ext.y <= 0
-            && ext.width >= screen_width as u32
-            && ext.height >= screen_height as u32
+        let outer = self.outer_geometry();
+        outer.x <= 0
+            && outer.y <= 0
+            && outer.width >= screen_width as u32
+            && outer.height >= screen_height as u32
     }
 }
