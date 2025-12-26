@@ -122,7 +122,7 @@ impl WindowFrame {
             0,
             &CreateWindowAux::new()
                 .background_pixel(COLOR_CLOSE)
-                .event_mask(EventMask::BUTTON_PRESS),
+                .event_mask(EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE),
         )?;
 
         // Create maximize button
@@ -140,7 +140,7 @@ impl WindowFrame {
             0,
             &CreateWindowAux::new()
                 .background_pixel(COLOR_MAX)
-                .event_mask(EventMask::BUTTON_PRESS),
+                .event_mask(EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE),
         )?;
 
         // Create minimize button
@@ -158,7 +158,7 @@ impl WindowFrame {
             0,
             &CreateWindowAux::new()
                 .background_pixel(COLOR_MIN)
-                .event_mask(EventMask::BUTTON_PRESS),
+                .event_mask(EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE),
         )?;
 
         // Reparent client into frame

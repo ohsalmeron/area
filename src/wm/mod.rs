@@ -405,24 +405,60 @@ impl WindowManager {
         };
         
         let screen = &conn.setup().roots[self.screen_num];
-        let dec_frame = decorations::WindowFrame::new(
-            conn,
-            screen,
-            client.id,
-            client.geometry.x as i16,
-            frame_y,
-            client.geometry.width as u16,
-            client.geometry.height as u16,
-        )?;
         
-        // Convert to simple WindowFrame for storage
-        client.frame = Some(crate::shared::window_state::WindowFrame {
-            frame: dec_frame.frame,
-            titlebar: dec_frame.titlebar,
-            close_button: dec_frame.close_button,
-            maximize_button: dec_frame.maximize_button,
-            minimize_button: dec_frame.minimize_button,
-        });
+        // Check if window should be decorated based on _NET_WM_WINDOW_TYPE
+        let window_types = self.atoms.get_window_type(conn, client.id).unwrap_or_default();
+        let mut should_decorate = true;
+        
+        for &win_type in &window_types {
+            if win_type == self.atoms._net_wm_window_type_dock ||
+               win_type == self.atoms._net_wm_window_type_tooltip ||
+               win_type == self.atoms._net_wm_window_type_notification ||
+               win_type == self.atoms._net_wm_window_type_splash ||
+               win_type == self.atoms._net_wm_window_type_menu ||
+               win_type == self.atoms._net_wm_window_type_dropdown_menu ||
+               win_type == self.atoms._net_wm_window_type_popup_menu {
+                should_decorate = false;
+                break;
+            }
+        }
+        
+        if should_decorate {
+            let dec_frame = decorations::WindowFrame::new(
+                conn,
+                screen,
+                client.id,
+                client.geometry.x as i16,
+                frame_y,
+                client.geometry.width as u16,
+                client.geometry.height as u16,
+            )?;
+            
+            // Convert to simple WindowFrame for storage
+            client.frame = Some(crate::shared::window_state::WindowFrame {
+                frame: dec_frame.frame,
+                titlebar: dec_frame.titlebar,
+                close_button: dec_frame.close_button,
+                maximize_button: dec_frame.maximize_button,
+                minimize_button: dec_frame.minimize_button,
+            });
+            
+            // Update _NET_FRAME_EXTENTS only if decorated
+            // Top: 32 (Titlebar), Left/Right/Bottom: 2 (Border)
+            let _ = self.atoms.update_frame_extents(conn, client.id, 2, 2, 32, 2);
+        } else {
+            // If not decorated, set _NET_FRAME_EXTENTS to 0
+            let _ = self.atoms.update_frame_extents(conn, client.id, 0, 0, 0, 0);
+            
+            // Reposition window below panel if needed (even if not decorated)
+            if client.geometry.y < PANEL_HEIGHT {
+                conn.configure_window(
+                    client.id,
+                    &ConfigureWindowAux::new().y(PANEL_HEIGHT),
+                )?;
+            }
+        }
+        
         client.mapped = true;
         
         conn.flush()?;
@@ -619,10 +655,13 @@ impl WindowManager {
             // Restore frame and client window
             if let Some(frame_state) = &client.frame {
                 let frame = decorations::WindowFrame::from_state(client.id, frame_state);
-                frame.move_to(conn, client.geometry.x as i16, client.geometry.y as i16)?;
+                // Frame position needs to account for titlebar - client is reparented at (0, TITLEBAR_HEIGHT)
+                // So if client.geometry.y is the client content position, frame should be at y - TITLEBAR_HEIGHT
+                const TITLEBAR_HEIGHT: i32 = 32;
+                let frame_y = client.geometry.y - TITLEBAR_HEIGHT;
+                frame.move_to(conn, client.geometry.x as i16, frame_y as i16)?;
                 frame.resize(conn, client.geometry.width as u16, client.geometry.height as u16)?;
             } else {
-
                 // No frame, restore client directly
                 conn.configure_window(
                     client.id,
@@ -633,6 +672,8 @@ impl WindowManager {
                         .height(client.geometry.height),
                 )?;
             }
+        } else {
+            warn!("Cannot restore window {} - no saved geometry found", client.id);
         }
         
         client.state.maximized = false;
@@ -738,13 +779,13 @@ impl WindowManager {
         let client = windows.get(&window_id)
             .context("Window not found")?;
         
-        info!("Starting drag for window {}", window_id);
+        info!("Starting drag for window {} at root coordinates ({}, {})", window_id, start_x, start_y);
         
         // Grab pointer for smooth dragging
         // Note: grab_pointer may fail if pointer is already grabbed, but we continue anyway
         // Cursor parameter: 0 means use current cursor, but we need to pass a Window
         // Using root window as cursor window (will use current cursor)
-        let _ = conn.grab_pointer(
+        let grab_result = conn.grab_pointer(
             false, // owner_events
             self.root,
             EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
@@ -755,7 +796,11 @@ impl WindowManager {
             x11rb::CURRENT_TIME,
         );
         
-        // Store drag state
+        if let Err(e) = grab_result {
+            warn!("Failed to grab pointer for drag: {:?}", e);
+        }
+        
+        // Store drag state with root coordinates
         self.drag_state = Some(DragState {
             window_id,
             start_x,
@@ -846,6 +891,30 @@ impl WindowManager {
                 }
             }
         }
+        None
+    }
+    
+    /// Find client window ID from any window ID (client, frame, titlebar, buttons)
+    pub fn find_client_from_window(
+        &self,
+        windows: &HashMap<u32, Client>,
+        window_id: u32,
+    ) -> Option<u32> {
+        // Check if it's a direct client window
+        if windows.contains_key(&window_id) {
+            return Some(window_id);
+        }
+        
+        // Check if it's part of a frame (frame, titlebar, buttons)
+        for (client_id, client) in windows {
+            if let Some(frame_state) = &client.frame {
+                let frame = decorations::WindowFrame::from_state(*client_id, frame_state);
+                if frame.contains(window_id) {
+                    return Some(*client_id);
+                }
+            }
+        }
+        
         None
     }
 }

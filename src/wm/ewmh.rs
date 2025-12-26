@@ -23,6 +23,15 @@ pub struct Atoms {
     pub net_wm_window_type: Atom,
     pub _net_wm_window_type_dock: Atom,
     pub _net_wm_window_type_normal: Atom,
+    pub _net_wm_window_type_dialog: Atom,
+    pub _net_wm_window_type_utility: Atom,
+    pub _net_wm_window_type_toolbar: Atom,
+    pub _net_wm_window_type_splash: Atom,
+    pub _net_wm_window_type_menu: Atom,
+    pub _net_wm_window_type_dropdown_menu: Atom,
+    pub _net_wm_window_type_popup_menu: Atom,
+    pub _net_wm_window_type_tooltip: Atom,
+    pub _net_wm_window_type_notification: Atom,
     pub net_wm_state: Atom,
     pub _net_wm_state_fullscreen: Atom,
     pub _net_wm_state_maximized_vert: Atom,
@@ -53,6 +62,15 @@ impl Atoms {
             net_wm_window_type: intern("_NET_WM_WINDOW_TYPE")?,
             _net_wm_window_type_dock: intern("_NET_WM_WINDOW_TYPE_DOCK")?,
             _net_wm_window_type_normal: intern("_NET_WM_WINDOW_TYPE_NORMAL")?,
+            _net_wm_window_type_dialog: intern("_NET_WM_WINDOW_TYPE_DIALOG")?,
+            _net_wm_window_type_utility: intern("_NET_WM_WINDOW_TYPE_UTILITY")?,
+            _net_wm_window_type_toolbar: intern("_NET_WM_WINDOW_TYPE_TOOLBAR")?,
+            _net_wm_window_type_splash: intern("_NET_WM_WINDOW_TYPE_SPLASH")?,
+            _net_wm_window_type_menu: intern("_NET_WM_WINDOW_TYPE_MENU")?,
+            _net_wm_window_type_dropdown_menu: intern("_NET_WM_WINDOW_TYPE_DROPDOWN_MENU")?,
+            _net_wm_window_type_popup_menu: intern("_NET_WM_WINDOW_TYPE_POPUP_MENU")?,
+            _net_wm_window_type_tooltip: intern("_NET_WM_WINDOW_TYPE_TOOLTIP")?,
+            _net_wm_window_type_notification: intern("_NET_WM_WINDOW_TYPE_NOTIFICATION")?,
             net_wm_state: intern("_NET_WM_STATE")?,
             _net_wm_state_fullscreen: intern("_NET_WM_STATE_FULLSCREEN")?,
             _net_wm_state_maximized_vert: intern("_NET_WM_STATE_MAXIMIZED_VERT")?,
@@ -206,5 +224,26 @@ impl Atoms {
         )?;
         
         Ok(())
+    }
+
+    /// Get window type (_NET_WM_WINDOW_TYPE)
+    pub fn get_window_type<C: Connection>(
+        &self,
+        conn: &C,
+        window: Window,
+    ) -> Result<Vec<Atom>> {
+        if let Ok(reply) = conn.get_property(
+            false,
+            window,
+            self.net_wm_window_type,
+            AtomEnum::ATOM,
+            0,
+            1024,
+        )?.reply() {
+            if let Some(value32) = reply.value32() {
+                return Ok(value32.collect());
+            }
+        }
+        Ok(Vec::new())
     }
 }

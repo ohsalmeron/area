@@ -45,9 +45,9 @@ impl Shell {
     }
     
     /// Update shell state (called every frame)
-    pub fn update(&mut self) {
-        self.panel.update();
-        self.logout_dialog.update();
+    /// Future: Add animations, clock updates, etc. here
+    pub fn update(&self) {
+        // Panel and logout dialog updates will be added here when needed
     }
     
     /// Update screen size (called when screen resolution changes)

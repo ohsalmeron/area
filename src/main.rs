@@ -498,7 +498,31 @@ impl AreaApp {
             }
             
             Event::DestroyNotify(e) => {
-                debug!("DestroyNotify for window {}", e.window);
+                info!("DestroyNotify for window {}", e.window);
+                if let Err(err) = self.handle_destroy(e.window) {
+                    warn!("Error handling destroy for window {}: {}", e.window, err);
+                }
+            }
+            
+            Event::ClientMessage(e) => {
+                // Handle WM_DELETE_WINDOW protocol responses
+                // When a window receives WM_DELETE_WINDOW and doesn't respond, we might get a ClientMessage
+                let wm_protocols_atom = self.conn.as_ref().intern_atom(false, b"WM_PROTOCOLS")?.reply();
+                let wm_delete_atom = self.conn.as_ref().intern_atom(false, b"WM_DELETE_WINDOW")?.reply();
+                
+                if let (Ok(wm_protocols), Ok(wm_delete)) = (wm_protocols_atom, wm_delete_atom) {
+                    if e.type_ == wm_protocols.atom {
+                        // as_data32() returns [u32; 5] directly, not Option
+                        let data32 = e.data.as_data32();
+                        if data32[0] == wm_delete.atom {
+                            debug!("ClientMessage: WM_DELETE_WINDOW response for window {}", e.window);
+                            // Window is closing - handle destroy
+                            if let Err(err) = self.handle_destroy(e.window) {
+                                warn!("Error handling destroy for window {}: {}", e.window, err);
+                            }
+                        }
+                    }
+                }
             }
             
             Event::MapNotify(e) => {
@@ -549,12 +573,78 @@ impl AreaApp {
                     warn!("Error handling shell click: {}", err);
                 }
                 
-                // Check if click is on a window decoration button or titlebar
+                // Find the client window from any window ID (client, frame, titlebar, buttons)
+                let client_id = self.wm.find_client_from_window(&self.wm_windows, e.event);
+                
+                if let Some(client_id) = client_id {
+                    // Check if click is on a button
+                    if let Some((_window_id, button_type)) = self.wm.find_window_from_button(&self.wm_windows, e.event) {
+                        if button_type.is_some() {
+                            // Button clicks are handled on ButtonRelease
+                            return Ok(());
+                        }
+                    }
+                    
+                    // Not a button - could be titlebar or client window
+                    if let Some(client) = self.wm_windows.get(&client_id) {
+                        let is_titlebar_click = if let Some(frame) = &client.frame {
+                            // Check if click is on titlebar window OR frame window in titlebar area
+                            if e.event == frame.titlebar {
+                                true
+                            } else if e.event == frame.frame {
+                                // Click on frame window - check if coordinates are in titlebar area
+                                // event_x/event_y are relative to the event window (frame)
+                                // Titlebar is at y=0 to y=TITLEBAR_HEIGHT
+                                const TITLEBAR_HEIGHT: i16 = 32;
+                                e.event_y < TITLEBAR_HEIGHT
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        
+                        // Focus the window
+                        if let Err(err) = self.wm.set_focus(&self.conn, &mut self.wm_windows, client_id) {
+                            warn!("Failed to focus window {}: {}", client_id, err);
+                        }
+                        
+                        // Start drag if clicking on titlebar with Button1
+                        // Use root coordinates for proper dragging
+                        if is_titlebar_click && e.detail == 1 {
+                            // Get root coordinates for the click
+                            if let Ok(pointer) = self.conn.as_ref().query_pointer(self.root)?.reply() {
+                                if let Err(err) = self.wm.start_drag(&self.conn, &self.wm_windows, client_id, pointer.root_x, pointer.root_y) {
+                                    warn!("Failed to start drag for window {}: {}", client_id, err);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Window not found - might be an unmanaged window
+                    debug!("ButtonPress on unmanaged window {}", e.event);
+                }
+            }
+            
+            Event::ButtonRelease(e) => {
+                debug!("ButtonRelease on window {} (detail={})", e.event, e.detail);
+                
+                // Handle button clicks on release
+                // Check if this is a button window first
                 if let Some((window_id, button_type)) = self.wm.find_window_from_button(&self.wm_windows, e.event) {
                     if let Some(btn_type) = button_type {
-                        // Handle button click
+                        debug!("Button {} clicked on window {}", 
+                            match btn_type {
+                                wm::ButtonType::Close => "Close",
+                                wm::ButtonType::Maximize => "Maximize",
+                                wm::ButtonType::Minimize => "Minimize",
+                            },
+                            window_id
+                        );
+                        // Handle button click on release
                         match btn_type {
                             wm::ButtonType::Close => {
+                                info!("Close button clicked for window {}", window_id);
                                 if let Err(err) = self.wm.close_window(&self.conn, window_id) {
                                     error!("Failed to close window {}: {}", window_id, err);
                                 }
@@ -570,29 +660,11 @@ impl AreaApp {
                                 }
                             }
                         }
-                    } else {
-                        // Titlebar click - focus window and start drag only on Button1 (left mouse button)
-                        if let Err(err) = self.wm.set_focus(&self.conn, &mut self.wm_windows, window_id) {
-                            warn!("Failed to focus window {}: {}", window_id, err);
-                        }
-                        // Only start drag on Button1 (detail == 1)
-                        if e.detail == 1 {
-                            if let Err(err) = self.wm.start_drag(&self.conn, &self.wm_windows, window_id, e.event_x, e.event_y) {
-                                warn!("Failed to start drag for window {}: {}", window_id, err);
-                            }
-                        }
-                    }
-                } else {
-                    // Click on client window - focus it
-                    if self.wm_windows.contains_key(&e.event) {
-                        if let Err(err) = self.wm.set_focus(&self.conn, &mut self.wm_windows, e.event) {
-                            warn!("Failed to focus window {}: {}", e.event, err);
-                        }
+                        // Don't end drag if we handled a button click
+                        return Ok(());
                     }
                 }
-            }
-            
-            Event::ButtonRelease(_e) => {
+                
                 // End drag/resize
                 if let Err(err) = self.wm.end_drag(&self.conn) {
                     debug!("Error ending drag: {}", err);
@@ -603,9 +675,9 @@ impl AreaApp {
                 // Update cursor position in compositor
                 self.compositor.update_cursor(e.root_x, e.root_y, true);
                 
-                // Handle drag
+                // Handle drag - use root coordinates for proper dragging
                 if self.wm.is_dragging() {
-                    if let Err(err) = self.wm.update_drag(&self.conn, &mut self.wm_windows, e.event_x, e.event_y) {
+                    if let Err(err) = self.wm.update_drag(&self.conn, &mut self.wm_windows, e.root_x, e.root_y) {
                         debug!("Error updating drag: {}", err);
                     }
                 }
@@ -680,7 +752,20 @@ impl AreaApp {
             }
             
             Event::XfixesCursorNotify(_e) => {
-                // Handled in compositor thread
+                // Cursor shape changed - update cursor image in compositor thread
+                self.compositor.update_cursor_image();
+            }
+            
+            Event::PropertyNotify(e) => {
+                // Check if _NET_WM_STATE changed (for fullscreen detection)
+                // Intern the atom to compare (we can't access wm.atoms directly, but we can intern it)
+                if let Ok(reply) = self.conn.as_ref().intern_atom(false, b"_NET_WM_STATE")?.reply() {
+                    if e.atom == reply.atom {
+                        // Window state changed - check for fullscreen
+                        debug!("PropertyNotify: _NET_WM_STATE changed for window {}", e.window);
+                        self.compositor.update_window_state(e.window);
+                    }
+                }
             }
             
             _ => {
@@ -847,6 +932,41 @@ impl AreaApp {
         Ok(())
     }
     
+    /// Handle DestroyNotify event
+    fn handle_destroy(&mut self, window_id: u32) -> Result<()> {
+        info!("handle_destroy called for window {}", window_id);
+        
+        // Find the client window - could be the destroyed window itself or its frame
+        let client_id = if self.wm_windows.contains_key(&window_id) {
+            // Direct client window destruction
+            info!("Window {} is a direct client window", window_id);
+            Some(window_id)
+        } else {
+            // Might be a frame window - find the client
+            info!("Window {} might be a frame window, searching for client...", window_id);
+            let found = self.wm.find_client_from_window(&self.wm_windows, window_id);
+            if found.is_some() {
+                info!("Found client window: {:?}", found);
+            } else {
+                info!("No client window found for {}", window_id);
+            }
+            found
+        };
+        
+        if let Some(client_id) = client_id {
+            info!("Cleaning up client window {}", client_id);
+            // Use handle_unmap for proper cleanup
+            self.handle_unmap(client_id)?;
+        } else {
+            // Window not found - might be a frame window that was already cleaned up
+            // or an unmanaged window, just clean up frame tracking
+            self.frame_windows.remove(&window_id);
+            warn!("DestroyNotify for unknown window {} (likely already cleaned up or not managed)", window_id);
+        }
+        
+        Ok(())
+    }
+    
     /// Handle UnmapNotify event
     fn handle_unmap(&mut self, window_id: u32) -> Result<()> {
         if let Some(mut client) = self.wm_windows.remove(&window_id) {
@@ -922,7 +1042,7 @@ async fn main() -> Result<()> {
     }
     
     // Create and run application
-    let mut app = AreaApp::new(replace).await?;
+    let app = AreaApp::new(replace).await?;
     
     // Get compositor handle before moving app into run()
     let compositor_handle = app.compositor.clone();

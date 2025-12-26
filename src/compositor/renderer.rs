@@ -270,7 +270,7 @@ impl Renderer {
     ) {
         let win_tex = match self.textures.get(&window_id) {
             Some(t) => {
-                debug!("Rendering window {} with texture {} (glx_pixmap={:?})", window_id, t.texture, t.glx_pixmap);
+                // debug!("Rendering window {} with texture {} (glx_pixmap={:?})", window_id, t.texture, t.glx_pixmap);
                 t
             }
             None => {
@@ -369,6 +369,22 @@ impl Renderer {
     /// Check if texture exists for window
     pub fn has_texture(&self, window_id: u32) -> bool {
         self.textures.contains_key(&window_id)
+    }
+    
+    /// Remove texture for a window (e.g., when geometry changes significantly)
+    pub fn remove_texture(&mut self, ctx: &super::gl_context::GlContext, window_id: u32) {
+        if let Some(win_tex) = self.textures.remove(&window_id) {
+            unsafe {
+                // Release GLX pixmap if it exists
+                if let Some(glx_pixmap) = win_tex.glx_pixmap {
+                    ctx.release_tex_image(glx_pixmap);
+                    ctx.destroy_glx_pixmap(glx_pixmap);
+                }
+                // Delete OpenGL texture
+                gl::DeleteTextures(1, &win_tex.texture);
+            }
+            debug!("Removed texture for window {} (geometry changed)", window_id);
+        }
     }
     
     /// Render a window as a fallback (colored rectangle) when texture is not available

@@ -35,8 +35,12 @@ pub enum CompositorCommand {
     UpdateWindowGeometry(u32, Geometry),
     /// Mark a window as damaged (needs re-paint)
     UpdateWindowDamage(u32),
+    /// Update window state (for fullscreen detection)
+    UpdateWindowState(u32),
     /// Update cursor position and visibility
     UpdateCursor(i16, i16, bool),
+    /// Update cursor image (shape change detected)
+    UpdateCursorImage,
     /// Signal that a render frame is needed
     TriggerRender,
     /// Shutdown the compositor thread
@@ -63,6 +67,8 @@ struct CompositorInner {
     rx: mpsc::UnboundedReceiver<CompositorCommand>,
     /// Force a render even if no damage/motion
     force_render: bool,
+    /// EWMH atoms (cached for performance)
+    ewmh_atoms: Option<crate::wm::ewmh::Atoms>,
 }
 
 impl Compositor {
@@ -130,8 +136,16 @@ impl Compositor {
         let _ = self.tx.send(CompositorCommand::UpdateWindowDamage(window_id));
     }
 
+    pub fn update_window_state(&self, window_id: u32) {
+        let _ = self.tx.send(CompositorCommand::UpdateWindowState(window_id));
+    }
+
     pub fn update_cursor(&self, x: i16, y: i16, visible: bool) {
         let _ = self.tx.send(CompositorCommand::UpdateCursor(x, y, visible));
+    }
+    
+    pub fn update_cursor_image(&self) {
+        let _ = self.tx.send(CompositorCommand::UpdateCursorImage);
     }
 
     pub fn trigger_render(&self) {
@@ -166,6 +180,9 @@ impl CompositorInner {
             conn.as_ref().setup().roots[screen_num].width_in_pixels,
             conn.as_ref().setup().roots[screen_num].height_in_pixels,
         );
+        
+        // Try to initialize EWMH atoms (may fail if WM hasn't initialized them yet)
+        let ewmh_atoms = crate::wm::ewmh::Atoms::new(conn.as_ref()).ok();
 
         Self {
             conn,
@@ -178,6 +195,7 @@ impl CompositorInner {
             shell,
             rx,
             force_render: true, // Initial render
+            ewmh_atoms,
         }
     }
 
@@ -245,6 +263,8 @@ impl CompositorInner {
                         win.damaged = true;
                     }
                 }
+                // Check if window is already fullscreen when added
+                self.handle_window_state_update(id);
             }
             CompositorCommand::RemoveWindow(id) => {
                 if let Some(w) = self.windows.remove(&id) {
@@ -255,6 +275,31 @@ impl CompositorInner {
             }
             CompositorCommand::UpdateWindowGeometry(id, geom) => {
                 if let Some(w) = self.windows.get_mut(&id) {
+                    // Check if size changed significantly (more than 10% change)
+                    let old_extents = w.extents();
+                    let new_extents = Geometry {
+                        x: geom.x,
+                        y: geom.y,
+                        width: geom.width + (w.border_width as u32) * 2,
+                        height: geom.height + (w.border_width as u32) * 2,
+                    };
+                    
+                    let size_changed_significantly = 
+                        (old_extents.width as f32 - new_extents.width as f32).abs() / old_extents.width.max(1) as f32 > 0.1 ||
+                        (old_extents.height as f32 - new_extents.height as f32).abs() / old_extents.height.max(1) as f32 > 0.1;
+                    
+                    // If size changed significantly, remove texture to force recreation
+                    if size_changed_significantly {
+                        if let Some(ref gl_ctx) = self.gl_context {
+                            if let Some(ref mut renderer) = self.renderer {
+                                renderer.remove_texture(gl_ctx, id);
+                                // Also clear pixmap so it gets recreated
+                                w.pixmap = None;
+                                debug!("Geometry changed significantly for window {}, removed texture for recreation", id);
+                            }
+                        }
+                    }
+                    
                     w.geometry = geom;
                     w.damaged = true;
                 }
@@ -264,10 +309,20 @@ impl CompositorInner {
                     w.damaged = true;
                 }
             }
+            CompositorCommand::UpdateWindowState(id) => {
+                self.handle_window_state_update(id);
+            }
             CompositorCommand::UpdateCursor(x, y, visible) => {
                 if let Some(ref mut c) = self.cursor_manager {
                     c.update_position(x, y);
                     c.visible = visible;
+                }
+            }
+            CompositorCommand::UpdateCursorImage => {
+                if let Some(ref mut c) = self.cursor_manager {
+                    if let Err(e) = c.update_image(self.conn.as_ref()) {
+                        debug!("Failed to update cursor image: {}", e);
+                    }
                 }
             }
             CompositorCommand::TriggerRender => {
@@ -284,14 +339,60 @@ impl CompositorInner {
         self.fps_counter.fps()
     }
 
+    /// Check if a window has the _NET_WM_STATE_FULLSCREEN property set
+    fn check_ewmh_fullscreen(&self, window_id: u32) -> bool {
+        let atoms = match &self.ewmh_atoms {
+            Some(a) => a,
+            None => return false,
+        };
+        
+        let cookie = match self.conn.as_ref().get_property(
+            false,
+            window_id,
+            atoms.net_wm_state,
+            AtomEnum::ATOM,
+            0,
+            1024,
+        ) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        
+        if let Ok(reply) = cookie.reply() {
+            if let Some(mut value32) = reply.value32() {
+                return value32.any(|atom| atom == atoms._net_wm_state_fullscreen);
+            }
+        }
+        false
+    }
+
+    /// Handle window state updates (just mark for re-render - we composite everything, overlay on top)
+    fn handle_window_state_update(&mut self, window_id: u32) {
+        // Just mark window as damaged so it re-renders with correct fullscreen handling
+        // We don't unredirect - we composite everything and overlay panel/cursor on top
+        if let Some(window) = self.windows.get_mut(&window_id) {
+            window.damaged = true;
+            debug!("Window {} state changed, marked for re-render", window_id);
+        }
+    }
+
     /// Render all managed windows and shell components.
     /// This is called internal to the Compositor thread.
     fn render(&mut self, screen_width: f32, screen_height: f32) -> Result<()> {
         use x11rb::connection::Connection;
+        // Update shell state (animations, clock, etc.)
+        self.shell.update();
+        
         // Local aliases for brevity and compatibility with existing code
         // Note: self.conn is Arc<RustConnection>, so we use as_ref() to get &RustConnection
         let conn = self.conn.as_ref();
         let shell = &self.shell;
+
+        // Check EWMH fullscreen state BEFORE mutable borrow of gl_context/renderer
+        let fullscreen_windows: std::collections::HashSet<u32> = self.windows.keys()
+            .filter(|&&id| self.check_ewmh_fullscreen(id))
+            .copied()
+            .collect();
 
         if let (Some(gl_context), Some(renderer)) = (&mut self.gl_context, &mut self.renderer) {
             self.fps_counter.tick();
@@ -307,8 +408,9 @@ impl CompositorInner {
             let panel_height = shell.panel.height();
             
             // First pass: lazy pixmap binding
+            // Skip unmapped/unviewable windows (performance optimization)
             let windows_to_bind: Vec<u32> = self.windows.values()
-                .filter(|w| !renderer.has_texture(w.id) && !w.bind_failed)
+                .filter(|w| w.viewable && !renderer.has_texture(w.id) && !w.bind_failed)
                 .map(|w| w.id)
                 .collect();
             
@@ -433,31 +535,66 @@ impl CompositorInner {
             }
             
             // Second pass: render windows
-            let mut windows_to_render: Vec<_> = self.windows.values().collect();
+            // Skip unmapped/unviewable windows (performance optimization)
+            let mut windows_to_render: Vec<_> = self.windows.values()
+                .filter(|w| w.viewable)
+                .collect();
             windows_to_render.sort_by_key(|w| w.id);
             
             for window in windows_to_render {
-                let window_y = window.geometry.y as f32;
-                let adjusted_y = if window_y < panel_height {
-                    panel_height
-                } else {
-                    window_y
-                };
+                // Check if window is fullscreen (geometry-based OR EWMH state)
+                // EWMH state check is important because windows can request fullscreen before resizing
+                let is_fullscreen_geometry = window.is_fullscreen(screen_width as u16, screen_height as u16);
+                let is_fullscreen_ewmh = fullscreen_windows.contains(&window.id);
+                let is_fullscreen = is_fullscreen_geometry || is_fullscreen_ewmh;
                 
                 if renderer.has_texture(window.id) {
-                    renderer.render_window(
-                        gl_context,
-                        window.id,
-                        window.geometry.x as f32,
-                        adjusted_y,
-                        window.geometry.width as f32,
-                        window.geometry.height as f32,
-                        screen_width,
-                        screen_height,
-                        window.opacity,
-                        window.damaged,
-                    );
+                    if is_fullscreen {
+                        // Fullscreen windows: render covering entire screen (0,0 to screen_width, screen_height)
+                        // This ensures the game covers everything, then panel/cursor overlay on top
+                        renderer.render_window(
+                            gl_context,
+                            window.id,
+                            0.0,  // x = 0
+                            0.0,  // y = 0 (covers panel area too)
+                            screen_width,  // width = full screen
+                            screen_height, // height = full screen
+                            screen_width,
+                            screen_height,
+                            window.opacity,
+                            window.damaged,
+                        );
+                    } else {
+                        // Normal windows: render at their position, adjusted for panel
+                        let window_y = window.geometry.y as f32;
+                        let adjusted_y = if window_y < panel_height {
+                            panel_height
+                        } else {
+                            window_y
+                        };
+                        
+                        renderer.render_window(
+                            gl_context,
+                            window.id,
+                            window.geometry.x as f32,
+                            adjusted_y,
+                            window.geometry.width as f32,
+                            window.geometry.height as f32,
+                            screen_width,
+                            screen_height,
+                            window.opacity,
+                            window.damaged,
+                        );
+                    }
                 } else {
+                    // Fallback rendering
+                    let window_y = window.geometry.y as f32;
+                    let adjusted_y = if window_y < panel_height {
+                        panel_height
+                    } else {
+                        window_y
+                    };
+                    
                     renderer.render_window_fallback(
                         gl_context,
                         window.id,

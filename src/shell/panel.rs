@@ -64,10 +64,6 @@ impl Panel {
         Ok(false)
     }
     
-    /// Update panel state
-    pub fn update(&mut self) {
-        // Update clock, etc. in the future
-    }
     
     /// Render the panel using the renderer
     pub fn render(&self, renderer: &crate::compositor::renderer::Renderer, screen_width: f32, screen_height: f32) {

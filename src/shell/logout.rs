@@ -157,10 +157,6 @@ impl LogoutDialog {
         Ok(())
     }
     
-    /// Update dialog state
-    pub fn update(&mut self) {
-        // Future: animations, etc.
-    }
     
     /// Render the dialog using the renderer
     pub fn render(&self, renderer: &crate::compositor::renderer::Renderer, screen_width: f32, screen_height: f32) {
