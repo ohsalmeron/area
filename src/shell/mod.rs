@@ -20,9 +20,9 @@ pub struct Shell {
 
 impl Shell {
     /// Create a new shell
-    pub fn new(screen_width: u16, screen_height: u16) -> Self {
+    pub fn new(screen_width: u16, screen_height: u16, panel_config: crate::config::PanelConfig) -> Self {
         Self {
-            panel: panel::Panel::new(screen_width, screen_height),
+            panel: panel::Panel::new(screen_width, screen_height, panel_config),
             logout_dialog: logout::LogoutDialog::new(),
         }
     }

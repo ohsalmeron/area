@@ -4,8 +4,7 @@ use anyhow::Result;
 use crate::shell::logout::LogoutDialog;
 use crate::shell::render;
 
-/// Panel configuration
-const PANEL_HEIGHT: f32 = 40.0;
+/// Panel button constants (hardcoded for now, could be moved to config later)
 const BUTTON_WIDTH: f32 = 80.0;
 const BUTTON_HEIGHT: f32 = 30.0;
 const BUTTON_PADDING: f32 = 5.0;
@@ -16,6 +15,9 @@ pub struct Panel {
     screen_width: u16,
     screen_height: u16,
     
+    /// Panel configuration
+    config: crate::config::PanelConfig,
+    
     /// Panel position (true = top, false = bottom)
     position_top: bool,
     
@@ -25,18 +27,22 @@ pub struct Panel {
 }
 
 impl Panel {
-    pub fn new(screen_width: u16, screen_height: u16) -> Self {
-        // Position panel at top
-        let position_top = true;
-        let y = if position_top { 0.0 } else { screen_height as f32 - PANEL_HEIGHT };
+    pub fn new(screen_width: u16, screen_height: u16, config: crate::config::PanelConfig) -> Self {
+        // Determine panel position from config
+        let position_top = config.position == "top";
+        let y = if position_top { 0.0 } else { screen_height as f32 - config.height };
         
-        // Position logout button on the right
+        // Position logout button on the right (using hardcoded button sizes for now)
+        const BUTTON_WIDTH: f32 = 80.0;
+        const BUTTON_HEIGHT: f32 = 30.0;
+        const BUTTON_PADDING: f32 = 5.0;
         let logout_button_x = screen_width as f32 - BUTTON_WIDTH - BUTTON_PADDING;
-        let logout_button_y = y + (PANEL_HEIGHT - BUTTON_HEIGHT) / 2.0;
+        let logout_button_y = y + (config.height - BUTTON_HEIGHT) / 2.0;
         
         Self {
             screen_width,
             screen_height,
+            config,
             position_top,
             logout_button_x,
             logout_button_y,
@@ -67,20 +73,20 @@ impl Panel {
     
     /// Render the panel using the renderer
     pub fn render(&self, renderer: &crate::compositor::renderer::Renderer, screen_width: f32, screen_height: f32) {
-        let y = if self.position_top { 0.0 } else { self.screen_height as f32 - PANEL_HEIGHT };
+        let y = if self.position_top { 0.0 } else { self.screen_height as f32 - self.config.height };
         
         // Render panel background
         renderer.render_rectangle(
             0.0,
             y,
             self.screen_width as f32,
-            PANEL_HEIGHT,
+            self.config.height,
             screen_width,
             screen_height,
-            0.2,  // r
-            0.2,  // g
-            0.2,  // b
-            0.9,  // a (semi-transparent)
+            self.config.color[0],  // r
+            self.config.color[1],  // g
+            self.config.color[2],  // b
+            self.config.opacity,   // a
         );
         
         // Render logout button background
@@ -142,14 +148,14 @@ impl Panel {
     
     /// Get panel height
     pub fn height(&self) -> f32 {
-        PANEL_HEIGHT
+        self.config.height
     }
     
     /// Check if point is on panel
     pub fn contains_point(&self, _x: i16, y: i16) -> bool {
-        let panel_y = if self.position_top { 0.0 } else { self.screen_height as f32 - PANEL_HEIGHT };
+        let panel_y = if self.position_top { 0.0 } else { self.screen_height as f32 - self.config.height };
         let fy = y as f32;
-        fy >= panel_y && fy < panel_y + PANEL_HEIGHT
+        fy >= panel_y && fy < panel_y + self.config.height
     }
     
     /// Update screen size (called when screen resolution changes)
@@ -158,9 +164,12 @@ impl Panel {
         self.screen_height = height;
         
         // Recalculate button positions
-        let y = if self.position_top { 0.0 } else { height as f32 - PANEL_HEIGHT };
+        const BUTTON_WIDTH: f32 = 80.0;
+        const BUTTON_HEIGHT: f32 = 30.0;
+        const BUTTON_PADDING: f32 = 5.0;
+        let y = if self.position_top { 0.0 } else { height as f32 - self.config.height };
         self.logout_button_x = width as f32 - BUTTON_WIDTH - BUTTON_PADDING;
-        self.logout_button_y = y + (PANEL_HEIGHT - BUTTON_HEIGHT) / 2.0;
+        self.logout_button_y = y + (self.config.height - BUTTON_HEIGHT) / 2.0;
     }
 }
 

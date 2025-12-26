@@ -46,6 +46,10 @@ pub struct WindowManager {
     /// stays alive (window is destroyed when struct is dropped).
     #[allow(dead_code)]
     wm_owner_window: u32,
+    /// Window manager configuration
+    config: crate::config::WindowManagerConfig,
+    /// Keybindings configuration (for key grabbing)
+    keybindings: crate::config::KeybindingsConfig,
 }
 
 impl WindowManager {
@@ -56,11 +60,15 @@ impl WindowManager {
     /// * `screen_num` - Screen number
     /// * `root` - Root window ID
     /// * `replace` - If true, attempt to replace existing WM (wait for it to exit)
+    /// * `config` - Window manager configuration
+    /// * `keybindings` - Keybindings configuration
     pub fn new(
         conn: &x11rb::rust_connection::RustConnection,
         screen_num: usize,
         root: u32,
         replace: bool,
+        config: crate::config::WindowManagerConfig,
+        keybindings: crate::config::KeybindingsConfig,
     ) -> Result<Self> {
         info!("Initializing window manager (replace={})", replace);
         
@@ -256,13 +264,26 @@ impl WindowManager {
         conn.flush()?;
         debug!("WM: _NET_SUPPORTING_WM_CHECK set to window 0x{:x}", wm_owner_window);
         
-        // Step 10: Grab SUPER key (Mod4) for launcher
+        // Step 10: Grab launcher key (configurable, defaults to SUPER)
         // Note: Key grabbing may fail if keycodes don't match - we'll handle gracefully
+        // TODO: Parse key names from config to keycodes (for now, hardcode SUPER keycodes)
         use x11rb::protocol::xproto::ModMask;
         let no_modifier = ModMask::from(0u16);
         
-        // Try to grab SUPER key (keycode 133 = left SUPER, 134 = right SUPER)
-        for keycode in [133u8, 134u8] {
+        // Try to grab launcher key (default: SUPER keycodes 133/134)
+        // This is a simplified version - full keybinding parser would be better
+        let launcher_keycodes: Vec<u8> = if keybindings.launcher_key == "Super" {
+            vec![133, 134] // Left and right SUPER keys
+        } else {
+            // Try to parse as keycode number
+            if let Ok(keycode) = keybindings.launcher_key.parse::<u8>() {
+                vec![keycode]
+            } else {
+                vec![133, 134] // Default fallback
+            }
+        };
+        
+        for keycode in launcher_keycodes {
             let _ = conn.grab_key(
                 false, // owner_events
                 root,
@@ -281,6 +302,8 @@ impl WindowManager {
             atoms,
             drag_state: None,
             wm_owner_window,
+            config,
+            keybindings,
         })
     }
     
@@ -397,7 +420,8 @@ impl WindowManager {
         }
         
         // Create window frame with decorations
-        // Account for panel height (40px) - frames should start below the panel
+        // Account for panel height - frames should start below the panel
+        // TODO: Pass panel config to WindowManager (using same PANEL_HEIGHT constant)
         let frame_y = if client.geometry.y < PANEL_HEIGHT {
             PANEL_HEIGHT as i16
         } else {
@@ -432,6 +456,8 @@ impl WindowManager {
                 frame_y,
                 client.geometry.width as u16,
                 client.geometry.height as u16,
+                &self.config.decorations,
+                &self.config.colors,
             )?;
             
             // Convert to simple WindowFrame for storage
@@ -444,8 +470,14 @@ impl WindowManager {
             });
             
             // Update _NET_FRAME_EXTENTS only if decorated
-            // Top: 32 (Titlebar), Left/Right/Bottom: 2 (Border)
-            let _ = self.atoms.update_frame_extents(conn, client.id, 2, 2, 32, 2);
+            let _ = self.atoms.update_frame_extents(
+                conn, 
+                client.id, 
+                self.config.decorations.border_width as u32, 
+                self.config.decorations.border_width as u32, 
+                self.config.decorations.titlebar_height as u32, 
+                self.config.decorations.border_width as u32
+            );
         } else {
             // If not decorated, set _NET_FRAME_EXTENTS to 0
             let _ = self.atoms.update_frame_extents(conn, client.id, 0, 0, 0, 0);
@@ -466,9 +498,14 @@ impl WindowManager {
         debug!("WM: Managed window {} ({})", client.id, client.title);
         
         // Update _NET_FRAME_EXTENTS so client knows about our decorations
-        // Currently hardcoded based on our hardcoded decoration sizes
-        // Top: 32 (Titlebar), Left/Right/Bottom: 2 (Border)
-        let _ = self.atoms.update_frame_extents(conn, client.id, 2, 2, 32, 2);
+        let _ = self.atoms.update_frame_extents(
+            conn, 
+            client.id, 
+            self.config.decorations.border_width as u32, 
+            self.config.decorations.border_width as u32, 
+            self.config.decorations.titlebar_height as u32, 
+            self.config.decorations.border_width as u32
+        );
         
         Ok(())
     }
@@ -510,10 +547,23 @@ impl WindowManager {
     ) -> Result<()> {
         info!("Closing window {}", window_id);
         
-        // Send WM_DELETE_WINDOW message
-        self.atoms.send_delete_window(conn, window_id)?;
-        conn.flush()?;
+        // Validate window ID
+        if window_id == 0 {
+            return Err(anyhow::anyhow!("Cannot close window with ID 0"));
+        }
         
+        // Check if window supports WM_DELETE_WINDOW protocol
+        if self.atoms.supports_delete_protocol(conn, window_id)? {
+            // Window supports graceful close - send WM_DELETE_WINDOW
+            self.atoms.send_delete_window(conn, window_id)?;
+        } else {
+            // Window doesn't support WM_DELETE_WINDOW - force kill it
+            warn!("Window {} doesn't support WM_DELETE_WINDOW, killing it", window_id);
+            use x11rb::protocol::xproto;
+            x11rb::protocol::xproto::kill_client(conn, window_id)?;
+        }
+        
+        conn.flush()?;
         Ok(())
     }
     
@@ -557,19 +607,19 @@ impl WindowManager {
         let max_height = screen.height_in_pixels as u32;
         
         // Account for decorations (titlebar height + borders)
-        const TITLEBAR_HEIGHT: u32 = 32;
-        const BORDER_WIDTH: u32 = 2;
+        let titlebar_height = self.config.decorations.titlebar_height as u32;
+        let border_width = self.config.decorations.border_width as u32;
         
         // Final frame outer geometry: (0, top_offset, max_width, max_height - top_offset)
         // Internal size of the frame:
-        let frame_width = max_width - (BORDER_WIDTH * 2);
-        let frame_height = max_height - top_offset - (BORDER_WIDTH * 2);
+        let frame_width = max_width - (border_width * 2);
+        let frame_height = max_height - top_offset - (border_width * 2);
         
         // Update window geometry (client relative to root)
-        client.geometry.x = BORDER_WIDTH as i32;
-        client.geometry.y = (top_offset + BORDER_WIDTH + TITLEBAR_HEIGHT) as i32;
+        client.geometry.x = border_width as i32;
+        client.geometry.y = (top_offset + border_width + titlebar_height) as i32;
         client.geometry.width = frame_width;
-        client.geometry.height = frame_height - TITLEBAR_HEIGHT;
+        client.geometry.height = frame_height - titlebar_height;
         client.state.maximized = true;
         
         // Resize frame and client window
@@ -577,10 +627,11 @@ impl WindowManager {
             let frame = decorations::WindowFrame::from_state(client.id, frame_state);
             
             // Move frame so its border is flush with screen edge
-            // Outer X = x - BORDER_WIDTH = 0 => x = BORDER_WIDTH
-            // Outer Y = y - BORDER_WIDTH = top_offset => y = top_offset + BORDER_WIDTH
-            frame.move_to(conn, BORDER_WIDTH as i16, (top_offset + BORDER_WIDTH) as i16)?;
-            frame.resize(conn, frame_width as u16, (frame_height - TITLEBAR_HEIGHT) as u16)?;
+            let border_width = self.config.decorations.border_width as i16;
+            // Outer X = x - border_width = 0 => x = border_width
+            // Outer Y = y - border_width = top_offset => y = top_offset + border_width
+            frame.move_to(conn, border_width, (top_offset + border_width as u32) as i16)?;
+            frame.resize(conn, frame_width as u16, (frame_height - self.config.decorations.titlebar_height as u32) as u16, &self.config.decorations)?;
         } else {
             // No frame, resize client directly
             conn.configure_window(
@@ -624,12 +675,12 @@ impl WindowManager {
             // Restore frame and client window
             if let Some(frame_state) = &client.frame {
                 let frame = decorations::WindowFrame::from_state(client.id, frame_state);
-                // Frame position needs to account for titlebar - client is reparented at (0, TITLEBAR_HEIGHT)
-                // So if client.geometry.y is the client content position, frame should be at y - TITLEBAR_HEIGHT
-                const TITLEBAR_HEIGHT: i32 = 32;
-                let frame_y = client.geometry.y - TITLEBAR_HEIGHT;
+                // Frame position needs to account for titlebar - client is reparented at (0, titlebar_height)
+                // So if client.geometry.y is the client content position, frame should be at y - titlebar_height
+                let titlebar_height = self.config.decorations.titlebar_height as i32;
+                let frame_y = client.geometry.y - titlebar_height;
                 frame.move_to(conn, client.geometry.x as i16, frame_y as i16)?;
-                frame.resize(conn, client.geometry.width as u16, client.geometry.height as u16)?;
+                frame.resize(conn, client.geometry.width as u16, client.geometry.height as u16, &self.config.decorations)?;
             } else {
                 // No frame, restore client directly
                 conn.configure_window(
@@ -684,6 +735,31 @@ impl WindowManager {
         client.state.minimized = true;
         
         conn.flush()?;
+        Ok(())
+    }
+    
+    /// Update _NET_CLIENT_LIST root property
+    pub fn update_client_list(
+        &self,
+        conn: &RustConnection,
+        root: Window,
+        windows: &[u32],
+    ) -> Result<()> {
+        self.atoms.update_client_list(conn, root, windows)?;
+        Ok(())
+    }
+    
+    /// Update _NET_FRAME_EXTENTS for a window
+    pub fn update_frame_extents(
+        &self,
+        conn: &RustConnection,
+        window: Window,
+        left: u32,
+        right: u32,
+        top: u32,
+        bottom: u32,
+    ) -> Result<()> {
+        self.atoms.update_frame_extents(conn, window, left, right, top, bottom)?;
         Ok(())
     }
     
@@ -807,13 +883,13 @@ impl WindowManager {
             
             // Move frame (if exists)
             if let Some(frame) = &client.frame {
-                const TITLEBAR_HEIGHT: u32 = 32;
+                let titlebar_height = self.config.decorations.titlebar_height as i32;
                 // Move frame window
                 conn.configure_window(
                     frame.frame,
                     &ConfigureWindowAux::new()
                         .x(new_x)
-                        .y(new_y - TITLEBAR_HEIGHT as i32),
+                        .y(new_y - titlebar_height),
                 )?;
             } else {
                 // No frame, move client window directly

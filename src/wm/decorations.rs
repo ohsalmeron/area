@@ -6,19 +6,6 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 
-const TITLEBAR_HEIGHT: u16 = 32;
-const BUTTON_SIZE: u16 = 16;
-const BUTTON_PADDING: u16 = 8;
-const BORDER_WIDTH: u16 = 2;
-
-// Nord Theme Colors
-const COLOR_BG: u32 = 0x2e3440;      // Polar Night Darkest
-const COLOR_TITLEBAR: u32 = 0x3b4252; // Polar Night Lighter
-const COLOR_BORDER: u32 = 0x5e81ac;   // Frost Blue
-const COLOR_CLOSE: u32 = 0xbf616a;    // Aurora Red
-const COLOR_MAX: u32 = 0xa3be8c;      // Aurora Green
-const COLOR_MIN: u32 = 0xebcb8b;      // Aurora Yellow
-
 /// Represents a window frame with decorations
 #[derive(Debug, Clone)]
 pub struct WindowFrame {
@@ -52,6 +39,8 @@ impl WindowFrame {
         y: i16,
         width: u16,
         height: u16,
+        decorations: &crate::config::WindowDecorationConfig,
+        colors: &crate::config::WindowColors,
     ) -> Result<Self> {
         let frame = conn.generate_id()?;
         let titlebar = conn.generate_id()?;
@@ -67,13 +56,13 @@ impl WindowFrame {
             x,
             y,
             width,
-            height + TITLEBAR_HEIGHT,
-            BORDER_WIDTH, 
+            height + decorations.titlebar_height,
+            decorations.border_width, 
             WindowClass::INPUT_OUTPUT,
             0,
             &CreateWindowAux::new()
-                .background_pixel(COLOR_BG)
-                .border_pixel(COLOR_BORDER)
+                .background_pixel(colors.background)
+                .border_pixel(colors.border)
                 .event_mask(
                     EventMask::SUBSTRUCTURE_REDIRECT
                         | EventMask::SUBSTRUCTURE_NOTIFY
@@ -92,36 +81,36 @@ impl WindowFrame {
             0,
             0,
             width,
-            TITLEBAR_HEIGHT,
+            decorations.titlebar_height,
             0,
             WindowClass::INPUT_OUTPUT,
             0,
             &CreateWindowAux::new()
-                .background_pixel(COLOR_TITLEBAR)
+                .background_pixel(colors.titlebar)
                 .event_mask(EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE),
         )?;
 
         // Create close button
         // Use i32 for calculations to avoid underflow on small windows
         let width_i32 = width as i32;
-        let btn_size = BUTTON_SIZE as i32;
-        let pad = BUTTON_PADDING as i32;
+        let btn_size = decorations.button_size as i32;
+        let pad = decorations.button_padding as i32;
 
         let close_x = width_i32 - btn_size - pad;
-        let btn_y = (TITLEBAR_HEIGHT - BUTTON_SIZE) / 2;
+        let btn_y = (decorations.titlebar_height - decorations.button_size) / 2;
         conn.create_window(
             screen.root_depth,
             close_button,
             titlebar,
             close_x as i16,
             btn_y as i16,
-            BUTTON_SIZE,
-            BUTTON_SIZE,
+            decorations.button_size,
+            decorations.button_size,
             0, // No border for buttons (flat look)
             WindowClass::INPUT_OUTPUT,
             0,
             &CreateWindowAux::new()
-                .background_pixel(COLOR_CLOSE)
+                .background_pixel(colors.close_button)
                 .event_mask(EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE),
         )?;
 
@@ -133,13 +122,13 @@ impl WindowFrame {
             titlebar,
             max_x as i16,
             btn_y as i16,
-            BUTTON_SIZE,
-            BUTTON_SIZE,
+            decorations.button_size,
+            decorations.button_size,
             0,
             WindowClass::INPUT_OUTPUT,
             0,
             &CreateWindowAux::new()
-                .background_pixel(COLOR_MAX)
+                .background_pixel(colors.maximize_button)
                 .event_mask(EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE),
         )?;
 
@@ -151,18 +140,18 @@ impl WindowFrame {
             titlebar,
             min_x as i16,
             btn_y as i16,
-            BUTTON_SIZE,
-            BUTTON_SIZE,
+            decorations.button_size,
+            decorations.button_size,
             0,
             WindowClass::INPUT_OUTPUT,
             0,
             &CreateWindowAux::new()
-                .background_pixel(COLOR_MIN)
+                .background_pixel(colors.minimize_button)
                 .event_mask(EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE),
         )?;
 
         // Reparent client into frame
-        conn.reparent_window(client, frame, 0, TITLEBAR_HEIGHT as i16)?;
+        conn.reparent_window(client, frame, 0, decorations.titlebar_height as i16)?;
         
         // Map all windows (frame first, then client)
         conn.map_window(frame)?;
@@ -206,12 +195,12 @@ impl WindowFrame {
     }
 
     /// Resize the frame and client
-    pub fn resize(&self, conn: &RustConnection, width: u16, height: u16) -> Result<()> {
+    pub fn resize(&self, conn: &RustConnection, width: u16, height: u16, decorations: &crate::config::WindowDecorationConfig) -> Result<()> {
         conn.configure_window(
             self.frame,
             &ConfigureWindowAux::new()
                 .width(width as u32)
-                .height((height + TITLEBAR_HEIGHT) as u32),
+                .height((height + decorations.titlebar_height) as u32),
         )?;
         conn.configure_window(
             self.titlebar,
@@ -225,9 +214,9 @@ impl WindowFrame {
         )?;
 
         // Reposition buttons
-        let close_x = width - BUTTON_SIZE - BUTTON_PADDING;
-        let max_x = close_x - BUTTON_SIZE - BUTTON_PADDING;
-        let min_x = max_x - BUTTON_SIZE - BUTTON_PADDING;
+        let close_x = width - decorations.button_size - decorations.button_padding;
+        let max_x = close_x - decorations.button_size - decorations.button_padding;
+        let min_x = max_x - decorations.button_size - decorations.button_padding;
 
         conn.configure_window(
             self.close_button,

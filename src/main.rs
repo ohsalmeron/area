@@ -9,6 +9,8 @@ mod shared;
 mod shell;
 mod dbus;
 mod x11_async;
+mod config;
+mod input;
 
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
@@ -53,6 +55,9 @@ struct AreaApp {
     screen_width: u16,
     screen_height: u16,
 
+    /// Configuration
+    config: config::Config,
+
     /// D-Bus manager
     _dbus: Option<dbus::DbusManager>,
     
@@ -88,17 +93,30 @@ impl AreaApp {
         info!("Connected to X server, screen {}, root window {}", screen_num, root);
         info!("Screen size: {}x{}", screen_width, screen_height);
         
+        // Load configuration
+        let config = config::Config::load()
+            .context("Failed to load configuration")?;
+        
+        // Initialize input manager and apply mouse configuration
+        if let Ok(input_manager) = input::InputManager::new(conn.clone()) {
+            if let Err(e) = input_manager.apply_mouse_config(&config.input.mouse) {
+                warn!("Failed to apply mouse configuration: {}", e);
+            }
+        } else {
+            warn!("Failed to initialize input manager - input configuration disabled");
+        }
+        
         // Initialize X11 async event stream (non-blocking polling)
         let x11_stream = x11_async::X11EventStream::new(conn.clone())
             .context("Failed to initialize X11 event stream")?;
         info!("X11 async event stream initialized");
         
         // Initialize window manager
-        let wm = wm::WindowManager::new(&conn, screen_num, root, replace)
+        let wm = wm::WindowManager::new(&conn, screen_num, root, replace, config.window_manager.clone(), config.keybindings.clone())
             .context("Failed to initialize window manager")?;
         
         // Initialize shell
-        let shell = shell::Shell::new(screen_width, screen_height);
+        let shell = shell::Shell::new(screen_width, screen_height, config.panel.clone());
         
         // Initialize compositor (spawns in separate thread)
         let compositor = compositor::Compositor::spawn(conn.clone(), screen_num, root)
@@ -152,6 +170,7 @@ impl AreaApp {
             last_frame: Instant::now(),
             screen_width,
             screen_height,
+            config,
             _dbus: dbus,
             _notifications: notifications,
             power,
@@ -505,6 +524,153 @@ impl AreaApp {
             }
             
             Event::ClientMessage(e) => {
+                // Handle _NET_CLOSE_WINDOW (EWMH close request)
+                if let Ok(net_close_atom) = self.conn.as_ref().intern_atom(false, b"_NET_CLOSE_WINDOW")?.reply() {
+                    if e.type_ == net_close_atom.atom && e.format == 32 {
+                        debug!("ClientMessage: _NET_CLOSE_WINDOW for window {}", e.window);
+                        // Find the client window (could be the window itself or its frame)
+                        let client_id = self.wm.find_client_from_window(&self.wm_windows, e.window);
+                        if let Some(client_id) = client_id {
+                            if let Err(err) = self.wm.close_window(&self.conn, client_id) {
+                                warn!("Failed to close window {} via _NET_CLOSE_WINDOW: {}", client_id, err);
+                            }
+                        } else {
+                            debug!("_NET_CLOSE_WINDOW for unmanaged window {}", e.window);
+                        }
+                        return Ok(());
+                    }
+                }
+                
+                // Handle _NET_WM_STATE (EWMH state change requests)
+                if let Ok(net_wm_state_atom) = self.conn.as_ref().intern_atom(false, b"_NET_WM_STATE")?.reply() {
+                    if e.type_ == net_wm_state_atom.atom && e.format == 32 {
+                        debug!("ClientMessage: _NET_WM_STATE for window {}", e.window);
+                        // Find the client window
+                        let client_id = self.wm.find_client_from_window(&self.wm_windows, e.window);
+                        if let Some(client_id) = client_id {
+                            let data32 = e.data.as_data32();
+                            let action = data32[0]; // 1=ADD, 2=REMOVE, 3=TOGGLE
+                            let first_atom = data32[1];
+                            let second_atom = data32[2];
+                            
+                            // Intern state atoms for comparison
+                            let fullscreen_atom = self.conn.as_ref().intern_atom(false, b"_NET_WM_STATE_FULLSCREEN")?.reply()?.atom;
+                            let max_vert_atom = self.conn.as_ref().intern_atom(false, b"_NET_WM_STATE_MAXIMIZED_VERT")?.reply()?.atom;
+                            let max_horz_atom = self.conn.as_ref().intern_atom(false, b"_NET_WM_STATE_MAXIMIZED_HORZ")?.reply()?.atom;
+                            let hidden_atom = self.conn.as_ref().intern_atom(false, b"_NET_WM_STATE_HIDDEN")?.reply()?.atom;
+                            
+                            // Handle FULLSCREEN
+                            if first_atom == fullscreen_atom || second_atom == fullscreen_atom {
+                                // For now, we just update the property - fullscreen handling is done via geometry
+                                // Apps can request fullscreen via this message
+                                debug!("_NET_WM_STATE FULLSCREEN requested (action={})", action);
+                                // The compositor will detect fullscreen via geometry or property changes
+                            }
+                            
+                            // Handle MAXIMIZE
+                            if (first_atom == max_vert_atom || second_atom == max_vert_atom) ||
+                               (first_atom == max_horz_atom || second_atom == max_horz_atom) {
+                                if let Some(client) = self.wm_windows.get(&client_id) {
+                                    let is_maximized = client.state.maximized;
+                                    let should_maximize = match action {
+                                        1 => !is_maximized, // ADD
+                                        2 => is_maximized,  // REMOVE
+                                        3 => !is_maximized, // TOGGLE
+                                        _ => false,
+                                    };
+                                    
+                                    if should_maximize && !is_maximized {
+                                        if let Err(err) = self.wm.maximize_window(&self.conn, self.wm_windows.get_mut(&client_id).unwrap(), self.shell.panel.height() as u32) {
+                                            warn!("Failed to maximize window {} via _NET_WM_STATE: {}", client_id, err);
+                                        }
+                                    } else if !should_maximize && is_maximized {
+                                        if let Err(err) = self.wm.restore_window(&self.conn, self.wm_windows.get_mut(&client_id).unwrap()) {
+                                            warn!("Failed to restore window {} via _NET_WM_STATE: {}", client_id, err);
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Handle HIDDEN (minimize)
+                            if first_atom == hidden_atom || second_atom == hidden_atom {
+                                if let Some(client) = self.wm_windows.get(&client_id) {
+                                    let is_minimized = !client.mapped;
+                                    let should_minimize = match action {
+                                        1 => !is_minimized, // ADD
+                                        2 => is_minimized,  // REMOVE
+                                        3 => !is_minimized, // TOGGLE
+                                        _ => false,
+                                    };
+                                    
+                                    if should_minimize && !is_minimized {
+                                        if let Err(err) = self.wm.minimize_window(&self.conn, &mut self.wm_windows, client_id) {
+                                            warn!("Failed to minimize window {} via _NET_WM_STATE: {}", client_id, err);
+                                        }
+                                    } else if !should_minimize && is_minimized {
+                                        if let Err(err) = self.wm.restore_window(&self.conn, self.wm_windows.get_mut(&client_id).unwrap()) {
+                                            warn!("Failed to restore window {} via _NET_WM_STATE: {}", client_id, err);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            debug!("_NET_WM_STATE for unmanaged window {}", e.window);
+                        }
+                        return Ok(());
+                    }
+                }
+                
+                // Handle _NET_ACTIVE_WINDOW (EWMH focus request)
+                if let Ok(net_active_atom) = self.conn.as_ref().intern_atom(false, b"_NET_ACTIVE_WINDOW")?.reply() {
+                    if e.type_ == net_active_atom.atom && e.format == 32 {
+                        debug!("ClientMessage: _NET_ACTIVE_WINDOW for window {}", e.window);
+                        let data32 = e.data.as_data32();
+                        let _source_indication = data32[0]; // 0=application, 1=pager, 2=wm
+                        let _timestamp = data32[1]; // timestamp or 0
+                        
+                        // Find the client window
+                        let client_id = self.wm.find_client_from_window(&self.wm_windows, e.window);
+                        if let Some(client_id) = client_id {
+                            // Focus the window
+                            if let Err(err) = self.wm.set_focus(&self.conn, &mut self.wm_windows, client_id) {
+                                warn!("Failed to focus window {} via _NET_ACTIVE_WINDOW: {}", client_id, err);
+                            }
+                        } else {
+                            debug!("_NET_ACTIVE_WINDOW for unmanaged window {}", e.window);
+                        }
+                        return Ok(());
+                    }
+                }
+                
+                // Handle _NET_REQUEST_FRAME_EXTENTS (EWMH frame extents request)
+                if let Ok(net_frame_extents_atom) = self.conn.as_ref().intern_atom(false, b"_NET_REQUEST_FRAME_EXTENTS")?.reply() {
+                    if e.type_ == net_frame_extents_atom.atom {
+                        debug!("ClientMessage: _NET_REQUEST_FRAME_EXTENTS for window {}", e.window);
+                        // Find the client window
+                        let client_id = self.wm.find_client_from_window(&self.wm_windows, e.window);
+                        if let Some(client_id) = client_id {
+                            if let Some(client) = self.wm_windows.get(&client_id) {
+                                // If window has a frame, send frame extents
+                                if client.frame.is_some() {
+                                    // Top: 32 (Titlebar), Left/Right/Bottom: 2 (Border)
+                                    if let Err(err) = self.wm.update_frame_extents(&self.conn, client_id, 2, 2, 32, 2) {
+                                        warn!("Failed to update frame extents for window {}: {}", client_id, err);
+                                    }
+                                }
+                            }
+                        } else {
+                            // Window not yet managed - use default frame extents
+                            // Top: 32 (Titlebar), Left/Right/Bottom: 2 (Border)
+                            if let Ok(atoms) = crate::wm::ewmh::Atoms::new(self.conn.as_ref()) {
+                                if let Err(err) = atoms.update_frame_extents(&self.conn, e.window, 2, 2, 32, 2) {
+                                    debug!("Failed to set default frame extents for window {}: {}", e.window, err);
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
+                
                 // Handle WM_DELETE_WINDOW protocol responses
                 // When a window receives WM_DELETE_WINDOW and doesn't respond, we might get a ClientMessage
                 let wm_protocols_atom = self.conn.as_ref().intern_atom(false, b"WM_PROTOCOLS")?.reply();
@@ -594,9 +760,9 @@ impl AreaApp {
                             } else if e.event == frame.frame {
                                 // Click on frame window - check if coordinates are in titlebar area
                                 // event_x/event_y are relative to the event window (frame)
-                                // Titlebar is at y=0 to y=TITLEBAR_HEIGHT
-                                const TITLEBAR_HEIGHT: i16 = 32;
-                                e.event_y < TITLEBAR_HEIGHT
+                                // Titlebar is at y=0 to y=titlebar_height
+                                let titlebar_height = self.config.window_manager.decorations.titlebar_height as i16;
+                                e.event_y < titlebar_height
                             } else {
                                 false
                             }
@@ -721,14 +887,26 @@ impl AreaApp {
             
             Event::KeyPress(e) => {
                 debug!("KeyPress: detail={}, state={:?}", e.detail, e.state);
-                // Check for SUPER key (Mod4) - bit 12 (0x1000)
-                // SUPER key alone or with other modifiers
-                // Check if Mod4 bit is set (0x1000 = bit 12) or if it's SUPER key (keycode 133/134)
+                // Check for launcher key from config
+                // For now, support keycode-based matching (133/134 for SUPER keys)
+                // TODO: Add full keybinding parser for key names like "Super"
+                let launcher_keycodes: Vec<u8> = if self.config.keybindings.launcher_key == "Super" {
+                    vec![133, 134] // Left and right SUPER keys
+                } else {
+                    // Try to parse as keycode number
+                    if let Ok(keycode) = self.config.keybindings.launcher_key.parse::<u8>() {
+                        vec![keycode]
+                    } else {
+                        vec![133, 134] // Default fallback
+                    }
+                };
+                
+                // Check if Mod4 bit is set (0x1000 = bit 12) or if keycode matches
                 let mod4_bit = 0x1000u16;
-                if (u16::from(e.state) & mod4_bit) != 0 || e.detail == 133 || e.detail == 134 {
-                    // Launch navigator on SUPER key press (keycode 133/134 or Mod4 modifier)
-                    info!("SUPER key pressed (keycode {}), launching navigator", e.detail);
-                    let _ = std::process::Command::new("navigator")
+                if (u16::from(e.state) & mod4_bit) != 0 || launcher_keycodes.contains(&e.detail) {
+                    // Launch launcher command from config
+                    info!("Launcher key pressed (keycode {}), launching {}", e.detail, self.config.keybindings.launcher_command);
+                    let _ = std::process::Command::new(&self.config.keybindings.launcher_command)
                         .env("DISPLAY", format!("{}", std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into())))
                         .spawn();
                 }
@@ -947,40 +1125,47 @@ impl AreaApp {
         // Store window
         self.wm_windows.insert(window_id, client);
         
+        // Update _NET_CLIENT_LIST
+        self.update_client_list()?;
+        
         debug!("Managed and mapped new window {}", window_id);
+        Ok(())
+    }
+    
+    /// Update _NET_CLIENT_LIST root property
+    fn update_client_list(&mut self) -> Result<()> {
+        let client_list: Vec<u32> = self.wm_windows.keys().copied().collect();
+        self.wm.update_client_list(&self.conn, self.root, &client_list)?;
+        self.conn.as_ref().flush()?;
         Ok(())
     }
     
     /// Handle DestroyNotify event
     fn handle_destroy(&mut self, window_id: u32) -> Result<()> {
-        info!("handle_destroy called for window {}", window_id);
-        
         // Find the client window - could be the destroyed window itself or its frame
         let client_id = if self.wm_windows.contains_key(&window_id) {
             // Direct client window destruction
-            info!("Window {} is a direct client window", window_id);
             Some(window_id)
         } else {
             // Might be a frame window - find the client
-            info!("Window {} might be a frame window, searching for client...", window_id);
-            let found = self.wm.find_client_from_window(&self.wm_windows, window_id);
-            if found.is_some() {
-                info!("Found client window: {:?}", found);
-            } else {
-                info!("No client window found for {}", window_id);
-            }
-            found
+            self.wm.find_client_from_window(&self.wm_windows, window_id)
         };
         
         if let Some(client_id) = client_id {
-            info!("Cleaning up client window {}", client_id);
+            debug!("DestroyNotify for client window {} - cleaning up", client_id);
             // Use handle_unmap for proper cleanup
             self.handle_unmap(client_id)?;
         } else {
-            // Window not found - might be a frame window that was already cleaned up
-            // or an unmanaged window, just clean up frame tracking
-            self.frame_windows.remove(&window_id);
-            warn!("DestroyNotify for unknown window {} (likely already cleaned up or not managed)", window_id);
+            // Window not found - check if it's a frame window that was already cleaned up
+            if self.frame_windows.contains(&window_id) {
+                // Frame window that was already cleaned up - this is expected when client closes
+                debug!("DestroyNotify for already-cleaned-up frame window {} (expected)", window_id);
+                self.frame_windows.remove(&window_id);
+            } else {
+                // Unknown window - might be unmanaged or already destroyed
+                debug!("DestroyNotify for unknown window {} (not managed or already destroyed)", window_id);
+                self.frame_windows.remove(&window_id);
+            }
         }
         
         Ok(())
@@ -1008,6 +1193,9 @@ impl AreaApp {
             
             // Let WM clean up (this will reparent window back to root)
             self.wm.unmanage_window(&self.conn, &mut client)?;
+            
+            // Update _NET_CLIENT_LIST
+            self.update_client_list()?;
             
             debug!("Unmanaged window {}", window_id);
         }

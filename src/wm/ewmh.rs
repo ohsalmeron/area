@@ -3,8 +3,9 @@
 //! Provides compatibility with desktop apps, panels, and other X11 clients.
 
 use anyhow::Result;
+use tracing::debug;
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::*;
+use x11rb::protocol::xproto::{ClientMessageEvent, *};
 use x11rb::wrapper::ConnectionExt as _;
 
 // EWMH (Extended Window Manager Hints) implementation... (rest of the code below)
@@ -132,6 +133,23 @@ impl Atoms {
         Ok(())
     }
 
+    /// Update _NET_CLIENT_LIST root property with list of managed windows
+    pub fn update_client_list<C: Connection>(
+        &self,
+        conn: &C,
+        root: Window,
+        windows: &[u32],
+    ) -> Result<()> {
+        conn.change_property32(
+            PropMode::REPLACE,
+            root,
+            self.net_client_list,
+            AtomEnum::WINDOW,
+            windows,
+        )?;
+        Ok(())
+    }
+
     /// Update _NET_FRAME_EXTENTS for a window
     pub fn update_frame_extents<C: Connection>(
         &self,
@@ -200,28 +218,61 @@ impl Atoms {
         Ok(())
     }
 
+    /// Check if window supports WM_DELETE_WINDOW protocol
+    pub fn supports_delete_protocol<C: Connection>(
+        &self,
+        conn: &C,
+        window: Window,
+    ) -> Result<bool> {
+        // Get WM_PROTOCOLS property
+        if let Ok(reply) = conn.get_property(
+            false,
+            window,
+            self._wm_protocols,
+            AtomEnum::ATOM,
+            0,
+            1024,
+        )?.reply() {
+            if let Some(value32) = reply.value32() {
+                // Check if WM_DELETE_WINDOW is in the protocols list
+                let protocols: Vec<u32> = value32.collect();
+                return Ok(protocols.contains(&self._wm_delete_window));
+            }
+        }
+        Ok(false)
+    }
+
     /// Send WM_DELETE_WINDOW message to close a window gracefully
     pub fn send_delete_window<C: Connection>(
         &self,
         conn: &C,
         window: Window,
     ) -> Result<()> {
-        // Build ClientMessage bytes manually
-        // Format: [response_type(1), unused(1), sequence(2), window(4), type(4), format(1), unused(2), data(20)]
-        let mut event_bytes = [0u8; 32];
-        event_bytes[0] = 33; // ClientMessage
-        event_bytes[4..8].copy_from_slice(&window.to_ne_bytes());
-        event_bytes[8..12].copy_from_slice(&self._wm_protocols.to_ne_bytes());
-        event_bytes[12] = 32; // format (32-bit)
-        event_bytes[16..20].copy_from_slice(&self._wm_delete_window.to_ne_bytes());
-        // Rest of data is zeros (timestamp = 0 = CurrentTime)
+        // Validate window ID
+        if window == 0 {
+            return Err(anyhow::anyhow!("Invalid window ID: 0"));
+        }
         
-        conn.send_event(
-            false,
-            window,
-            EventMask::NO_EVENT,
-            event_bytes,
-        )?;
+        // Use ClientMessageEvent::new() - the proper x11rb/XCB way
+        let event = ClientMessageEvent::new(
+            32, // format (32-bit)
+            window, // destination window
+            self._wm_protocols, // message type atom
+            [self._wm_delete_window, 0, 0, 0, 0], // data (timestamp = 0 = CurrentTime)
+        );
+        
+        // NO_EVENT is correct for XCB/x11rb ClientMessage events
+        // This is the standard way per x11rb examples and XCB documentation
+        if let Err(e) = conn.send_event(
+            false, // propagate
+            window, // destination
+            EventMask::NO_EVENT, // event_mask - correct for XCB/x11rb
+            event,
+        ) {
+            // If window is already destroyed, that's fine - it's already closed
+            debug!("Failed to send WM_DELETE_WINDOW to window {} (may already be destroyed): {}", window, e);
+            // Don't return error - window closing is the desired outcome
+        }
         
         Ok(())
     }

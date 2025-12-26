@@ -176,9 +176,12 @@ impl CompositorInner {
         use x11rb::connection::Connection;
         let renderer = gl_context.as_ref().and_then(|_| Renderer::new().ok());
         let cursor_manager = CursorManager::new(&conn, conn.as_ref().setup().roots[screen_num].root).ok();
+        // Use default panel config for compositor's shell (it's just for rendering)
+        let default_panel_config = crate::config::PanelConfig::default();
         let shell = crate::shell::Shell::new(
             conn.as_ref().setup().roots[screen_num].width_in_pixels,
             conn.as_ref().setup().roots[screen_num].height_in_pixels,
+            default_panel_config,
         );
         
         // Try to initialize EWMH atoms (may fail if WM hasn't initialized them yet)
