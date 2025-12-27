@@ -72,6 +72,9 @@ struct AreaApp {
     
     /// Frame windows created by the WM (to prevent recursive management)
     frame_windows: HashSet<u32>,
+    
+    /// Last titlebar click for double-click detection
+    last_titlebar_click: Option<(u32, u32, i16, i16)>, // (window_id, time, x, y)
 }
 
 impl AreaApp {
@@ -176,6 +179,7 @@ impl AreaApp {
             power,
             reparenting_windows: HashSet::new(),
             frame_windows: HashSet::new(),
+            last_titlebar_click: None,
         };
         
         // Show startup notification
@@ -433,7 +437,6 @@ impl AreaApp {
             Event::UnmapNotify(e) => {
                 // Ignore UnmapNotify events caused by our own reparenting operations
                 if self.reparenting_windows.contains(&e.window) {
-                    debug!("Ignoring UnmapNotify for window {} (caused by reparenting)", e.window);
                     return Ok(());
                 }
                 
@@ -441,12 +444,10 @@ impl AreaApp {
                 // reparenting and other normal operations. Only unmanage on DestroyNotify.
                 if let Some(client) = self.wm_windows.get(&e.window) {
                     if client.frame.is_some() {
-                        debug!("Ignoring UnmapNotify for framed window {} (will unmanage on DestroyNotify)", e.window);
                         return Ok(());
                     }
                 }
                 
-                debug!("UnmapNotify for window {}", e.window);
                 self.handle_unmap(e.window)?;
             }
             
@@ -517,9 +518,8 @@ impl AreaApp {
             }
             
             Event::DestroyNotify(e) => {
-                info!("DestroyNotify for window {}", e.window);
                 if let Err(err) = self.handle_destroy(e.window) {
-                    warn!("Error handling destroy for window {}: {}", e.window, err);
+                    warn!("Error handling DestroyNotify for window {}: {}", e.window, err);
                 }
             }
             
@@ -775,54 +775,68 @@ impl AreaApp {
                             warn!("Failed to focus window {}: {}", client_id, err);
                         }
                         
-                        // Start drag if clicking on titlebar with Button1
-                        // Use root coordinates for proper dragging
+                        // Handle titlebar clicks with Button1
                         if is_titlebar_click && e.detail == 1 {
-                            // Get root coordinates for the click
-                            if let Ok(pointer) = self.conn.as_ref().query_pointer(self.root)?.reply() {
-                                if let Err(err) = self.wm.start_drag(&self.conn, &self.wm_windows, client_id, pointer.root_x, pointer.root_y) {
-                                    warn!("Failed to start drag for window {}: {}", client_id, err);
+                            // Check for double-click (within 300ms and 6 pixels)
+                            const DOUBLE_CLICK_TIME_MS: u32 = 300;
+                            const DOUBLE_CLICK_DISTANCE: i16 = 6;
+                            
+                            let is_double_click = if let Some((last_window, last_time, last_x, last_y)) = self.last_titlebar_click {
+                                last_window == client_id
+                                    && e.time < last_time + DOUBLE_CLICK_TIME_MS
+                                    && (e.event_x - last_x).abs() < DOUBLE_CLICK_DISTANCE
+                                    && (e.event_y - last_y).abs() < DOUBLE_CLICK_DISTANCE
+                            } else {
+                                false
+                            };
+                            
+                            if is_double_click {
+                                // Double-click detected - toggle maximize
+                                debug!("Double-click on titlebar for window {} - toggling maximize", client_id);
+                                if let Err(err) = self.wm.toggle_maximize(&self.conn, &mut self.wm_windows, client_id, self.shell.panel.height() as u32) {
+                                    warn!("Failed to toggle maximize window {}: {}", client_id, err);
                                 }
+                                // Reset double-click tracking
+                                self.last_titlebar_click = None;
+                            } else {
+                                // Single click - start drag and track for potential double-click
+                                // Get root coordinates for the click
+                                if let Ok(pointer) = self.conn.as_ref().query_pointer(self.root)?.reply() {
+                                    if let Err(err) = self.wm.start_drag(&self.conn, &self.wm_windows, client_id, pointer.root_x, pointer.root_y) {
+                                        warn!("Failed to start drag for window {}: {}", client_id, err);
+                                    }
+                                }
+                                // Track this click for double-click detection
+                                self.last_titlebar_click = Some((client_id, e.time, e.event_x, e.event_y));
                             }
                         }
                     }
-                } else {
-                    // Window not found - might be an unmanaged window
-                    debug!("ButtonPress on unmanaged window {}", e.event);
                 }
             }
             
             Event::ButtonRelease(e) => {
-                debug!("ButtonRelease on window {} (detail={})", e.event, e.detail);
-                
                 // Handle button clicks on release
                 // Check if this is a button window first
                 if let Some((window_id, button_type)) = self.wm.find_window_from_button(&self.wm_windows, e.event) {
                     if let Some(btn_type) = button_type {
-                        debug!("Button {} clicked on window {}", 
-                            match btn_type {
-                                wm::ButtonType::Close => "Close",
-                                wm::ButtonType::Maximize => "Maximize",
-                                wm::ButtonType::Minimize => "Minimize",
-                            },
-                            window_id
-                        );
                         // Handle button click on release
                         match btn_type {
                             wm::ButtonType::Close => {
-                                info!("Close button clicked for window {}", window_id);
+                                debug!("Close button clicked for window {}", window_id);
                                 if let Err(err) = self.wm.close_window(&self.conn, window_id) {
-                                    error!("Failed to close window {}: {}", window_id, err);
+                                    warn!("Failed to close window {}: {}", window_id, err);
                                 }
                             }
                             wm::ButtonType::Maximize => {
+                                debug!("Maximize button clicked for window {}", window_id);
                                 if let Err(err) = self.wm.toggle_maximize(&self.conn, &mut self.wm_windows, window_id, self.shell.panel.height() as u32) {
-                                    error!("Failed to toggle maximize window {}: {}", window_id, err);
+                                    warn!("Failed to toggle maximize window {}: {}", window_id, err);
                                 }
                             }
                             wm::ButtonType::Minimize => {
+                                debug!("Minimize button clicked for window {}", window_id);
                                 if let Err(err) = self.wm.minimize_window(&self.conn, &mut self.wm_windows, window_id) {
-                                    error!("Failed to minimize window {}: {}", window_id, err);
+                                    warn!("Failed to minimize window {}: {}", window_id, err);
                                 }
                             }
                         }
@@ -1197,7 +1211,9 @@ impl AreaApp {
             // Update _NET_CLIENT_LIST
             self.update_client_list()?;
             
-            debug!("Unmanaged window {}", window_id);
+            debug!("Unmanaged window {} (cleaned up)", window_id);
+        } else {
+            debug!("UnmapNotify for window {} (not managed)", window_id);
         }
         Ok(())
     }

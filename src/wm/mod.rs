@@ -516,7 +516,7 @@ impl WindowManager {
         conn: &x11rb::rust_connection::RustConnection,
         client: &mut Client,
     ) -> Result<()> {
-        debug!("WM: Unmanaging window {}", client.id);
+        debug!("Unmanaging window {}", client.id);
         
         // Clear drag/resize state if this window was being dragged/resized
         if let Some(ref drag) = self.drag_state {
@@ -535,7 +535,7 @@ impl WindowManager {
             client.frame = None;
         }
         
-        debug!("WM: Unmanaged window {}", client.id);
+        debug!("Unmanaged window {} (reparented back to root)", client.id);
         Ok(())
     }
     
@@ -545,8 +545,6 @@ impl WindowManager {
         conn: &RustConnection,
         window_id: u32,
     ) -> Result<()> {
-        info!("Closing window {}", window_id);
-        
         // Validate window ID
         if window_id == 0 {
             return Err(anyhow::anyhow!("Cannot close window with ID 0"));
@@ -555,10 +553,11 @@ impl WindowManager {
         // Check if window supports WM_DELETE_WINDOW protocol
         if self.atoms.supports_delete_protocol(conn, window_id)? {
             // Window supports graceful close - send WM_DELETE_WINDOW
+            debug!("Sending WM_DELETE_WINDOW to window {} (graceful close)", window_id);
             self.atoms.send_delete_window(conn, window_id)?;
         } else {
             // Window doesn't support WM_DELETE_WINDOW - force kill it
-            warn!("Window {} doesn't support WM_DELETE_WINDOW, killing it", window_id);
+            warn!("Window {} doesn't support WM_DELETE_WINDOW protocol, force killing", window_id);
             use x11rb::protocol::xproto;
             x11rb::protocol::xproto::kill_client(conn, window_id)?;
         }
@@ -666,7 +665,7 @@ impl WindowManager {
         conn: &RustConnection,
         client: &mut Client,
     ) -> Result<()> {
-        info!("Restoring window {}", client.id);
+        debug!("Restoring window {}", client.id);
         
         // Restore from saved geometry
         if let Some(restore) = client.restore_geometry {
@@ -722,7 +721,7 @@ impl WindowManager {
         let client = windows.get_mut(&window_id)
             .context("Window not found")?;
         
-        info!("Minimizing window {}", window_id);
+        debug!("Minimizing window {}", window_id);
         
         // Unmap window (hide it)
         if let Some(frame) = &client.frame {
@@ -824,7 +823,7 @@ impl WindowManager {
         let client = windows.get(&window_id)
             .context("Window not found")?;
         
-        info!("Starting drag for window {} at root coordinates ({}, {})", window_id, start_x, start_y);
+        debug!("Starting drag for window {} at ({}, {})", window_id, start_x, start_y);
         
         // Grab pointer for smooth dragging
         // Note: grab_pointer may fail if pointer is already grabbed, but we continue anyway
