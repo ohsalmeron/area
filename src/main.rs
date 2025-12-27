@@ -114,7 +114,7 @@ impl AreaApp {
         info!("X11 async event stream initialized");
         
         // Initialize window manager
-        let wm = wm::WindowManager::new(&conn, screen_num, root, replace, config.window_manager.clone(), config.keybindings.clone())
+        let wm = wm::WindowManager::new(&conn, screen_num, root, replace)
             .context("Failed to initialize window manager")?;
         
         // Initialize shell
@@ -454,6 +454,48 @@ impl AreaApp {
                 info!("ConfigureRequest for window {} ({}x{} at {},{}))", 
                     e.window, e.width, e.height, e.x, e.y);
                 
+                // Find the client window (could be direct or via frame)
+                let client_id = if let Some(_) = self.wm_windows.get(&e.window) {
+                    Some(e.window)
+                } else {
+                    self.wm.find_client_from_window(&self.wm_windows, e.window)
+                };
+                
+                // Check if this is a fullscreen-size request (games often request screen size)
+                if let Some(cid) = client_id {
+                    if let Some(client) = self.wm_windows.get_mut(&cid) {
+                        let screen_width = self.screen_width as u32;
+                        let screen_height = self.screen_height as u32;
+                        
+                        // Check if requested size is close to screen size (within 20px tolerance)
+                        // Games might request slightly less than screen size
+                        let is_screen_size = (e.width as u32) >= screen_width.saturating_sub(20) 
+                                          && (e.width as u32) <= screen_width + 20
+                                          && (e.height as u32) >= screen_height.saturating_sub(20)
+                                          && (e.height as u32) <= screen_height + 20
+                                          && e.x <= 20 && e.y <= 20;
+                        
+                        // If window requests fullscreen size and has bypass_compositor, force fullscreen
+                        // This handles games that resize to fullscreen without setting EWMH state first
+                        if is_screen_size && !client.state.fullscreen {
+                            if let Ok(bypass) = self.wm.atoms.check_bypass_compositor(&self.conn, cid) {
+                                if bypass {
+                                    debug!("ConfigureRequest: Window {} requests fullscreen size with bypass_compositor, setting fullscreen", cid);
+                                    if let Err(err) = self.wm.set_fullscreen(&self.conn, client, true) {
+                                        warn!("Failed to set fullscreen for window {} (ConfigureRequest detection): {}", cid, err);
+                                    } else {
+                                        // Coordinate with compositor: unredirect if config allows
+                                        // Use client window directly for fullscreen (frame is hidden)
+                                        if self.config.compositor.unredirect_fullscreen {
+                                            self.compositor.unredirect_window(cid);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
                 // Grant the configure request
                 self.conn.as_ref().configure_window(
                     e.window,
@@ -592,16 +634,16 @@ impl AreaApp {
                                         } else {
                                             state_changed = true;
                                             // Coordinate with compositor: unredirect/redirect based on fullscreen state
-                                            let target_id = client.frame.as_ref().map(|f| f.frame).unwrap_or(client_id);
+                                            // Use client window directly for fullscreen (frame is hidden)
                                             if !current {
                                                 // Entering fullscreen - unredirect if config allows
                                                 if self.config.compositor.unredirect_fullscreen {
-                                                    self.compositor.unredirect_window(target_id);
+                                                    self.compositor.unredirect_window(client_id);
                                                 }
                                             } else {
                                                 // Exiting fullscreen - redirect back
                                                 if self.config.compositor.unredirect_fullscreen {
-                                                    self.compositor.redirect_window(target_id);
+                                                    self.compositor.redirect_window(client_id);
                                                 }
                                             }
                                         }
@@ -839,7 +881,7 @@ impl AreaApp {
                                 // If window has a frame, send frame extents
                                 if client.frame.is_some() {
                                     // Top: 32 (Titlebar), Left/Right/Bottom: 2 (Border)
-                                    if let Err(err) = self.wm.update_frame_extents(&self.conn, client_id, 2, 2, 32, 2) {
+                                    if let Err(err) = self.wm.atoms.update_frame_extents(&self.conn, client_id, 2, 2, 32, 2) {
                                         warn!("Failed to update frame extents for window {}: {}", client_id, err);
                                     }
                                 }
@@ -1067,11 +1109,26 @@ impl AreaApp {
             }
             
             Event::ConfigureNotify(e) => {
-                // If this is a managed client window with a frame, ignore its ConfigureNotify
-                // because it's in relative coordinates. Frame's ConfigureNotify will update geometry.
-                if let Some(client) = self.wm_windows.get(&e.window) {
-                    if client.frame.is_some() {
-                        return Ok(());
+                // Find the client window - could be e.window directly or via frame
+                let client_id = if let Some(_) = self.wm_windows.get(&e.window) {
+                    // This is the client window
+                    Some(e.window)
+                } else {
+                    // Might be a frame window - find the client
+                    self.wm.find_client_from_window(&self.wm_windows, e.window)
+                };
+                
+                // If this is a managed client window with a frame, and e.window is the client,
+                // ignore its ConfigureNotify because it's in relative coordinates.
+                // Frame's ConfigureNotify will update geometry.
+                if let Some(cid) = client_id {
+                    if cid == e.window {
+                        if let Some(client) = self.wm_windows.get(&cid) {
+                            if client.frame.is_some() {
+                                // Client ConfigureNotify with frame - ignore (coordinates are relative to frame)
+                                return Ok(());
+                            }
+                        }
                     }
                 }
 
@@ -1084,41 +1141,52 @@ impl AreaApp {
                 );
                 self.compositor.update_window_geometry(e.window, geom);
                 
-                // Geometry-based fullscreen detection: if window resizes to screen size, trigger fullscreen
+                // Geometry-based fullscreen detection: if window/frame resizes to screen size, trigger fullscreen
                 // This handles games that resize first, then set EWMH property
-                if let Some(client) = self.wm_windows.get_mut(&e.window) {
-                    // Check if window geometry matches screen size (within 1px tolerance for rounding)
-                    let screen_width = self.screen_width as u32;
-                    let screen_height = self.screen_height as u32;
-                    let is_screen_size = e.width >= (screen_width as u16).saturating_sub(1) 
-                                      && e.width <= (screen_width as u16) + 1
-                                      && e.height >= (screen_height as u16).saturating_sub(1)
-                                      && e.height <= (screen_height as u16) + 1
-                                      && e.x <= 1 && e.y <= 1;
-                    
-                    // Only auto-detect if not already fullscreen
-                    if is_screen_size && !client.state.fullscreen {
-                        debug!("Geometry-based fullscreen detection: window {} resized to screen size, setting fullscreen", e.window);
-                        if let Err(err) = self.wm.set_fullscreen(&self.conn, client, true) {
-                            warn!("Failed to set fullscreen for window {} (geometry-based detection): {}", e.window, err);
-                        } else {
-                            // Coordinate with compositor: unredirect if config allows
-                            let target_id = client.frame.as_ref().map(|f| f.frame).unwrap_or(e.window);
-                            if self.config.compositor.unredirect_fullscreen {
-                                self.compositor.unredirect_window(target_id);
+                if let Some(cid) = client_id {
+                    if let Some(client) = self.wm_windows.get_mut(&cid) {
+                        // Check if window/frame geometry matches screen size (within 20px tolerance)
+                        let screen_width = self.screen_width as u32;
+                        let screen_height = self.screen_height as u32;
+                        let is_screen_size = e.width >= (screen_width as u16).saturating_sub(20) 
+                                          && e.width <= (screen_width as u16) + 20
+                                          && e.height >= (screen_height as u16).saturating_sub(20)
+                                          && e.height <= (screen_height as u16) + 20
+                                          && e.x <= 20 && e.y <= 20;
+                        
+                        // Only auto-detect if not already fullscreen
+                        if is_screen_size && !client.state.fullscreen {
+                            // Check if window has bypass_compositor (indicates game wants fullscreen)
+                            let should_fullscreen = if let Ok(bypass) = self.wm.atoms.check_bypass_compositor(&self.conn, cid) {
+                                bypass // If bypass is set, definitely fullscreen
+                            } else {
+                                true // Otherwise, still check (might be fullscreen request)
+                            };
+                            
+                            if should_fullscreen {
+                                debug!("Geometry-based fullscreen detection: window {} resized to screen size, setting fullscreen", cid);
+                                if let Err(err) = self.wm.set_fullscreen(&self.conn, client, true) {
+                                    warn!("Failed to set fullscreen for window {} (geometry-based detection): {}", cid, err);
+                                } else {
+                                    // Coordinate with compositor: unredirect if config allows
+                                    // Use client window directly for fullscreen (frame is hidden)
+                                    if self.config.compositor.unredirect_fullscreen {
+                                        self.compositor.unredirect_window(cid);
+                                    }
+                                }
                             }
-                        }
-                    } else if !is_screen_size && client.state.fullscreen {
-                        // Window is no longer screen size but is marked fullscreen - exit fullscreen
-                        // (This handles cases where games resize out of fullscreen before clearing EWMH state)
-                        debug!("Geometry-based fullscreen detection: window {} no longer screen size, exiting fullscreen", e.window);
-                        if let Err(err) = self.wm.set_fullscreen(&self.conn, client, false) {
-                            warn!("Failed to exit fullscreen for window {} (geometry-based detection): {}", e.window, err);
-                        } else {
-                            // Coordinate with compositor: redirect back
-                            let target_id = client.frame.as_ref().map(|f| f.frame).unwrap_or(e.window);
-                            if self.config.compositor.unredirect_fullscreen {
-                                self.compositor.redirect_window(target_id);
+                        } else if !is_screen_size && client.state.fullscreen {
+                            // Window is no longer screen size but is marked fullscreen - exit fullscreen
+                            // (This handles cases where games resize out of fullscreen before clearing EWMH state)
+                            debug!("Geometry-based fullscreen detection: window {} no longer screen size, exiting fullscreen", cid);
+                            if let Err(err) = self.wm.set_fullscreen(&self.conn, client, false) {
+                                warn!("Failed to exit fullscreen for window {} (geometry-based detection): {}", cid, err);
+                            } else {
+                                // Coordinate with compositor: redirect back
+                                // Use client window directly for fullscreen (frame is hidden)
+                                if self.config.compositor.unredirect_fullscreen {
+                                    self.compositor.redirect_window(cid);
+                                }
                             }
                         }
                     }
@@ -1378,14 +1446,57 @@ impl AreaApp {
 
         self.compositor.add_window(c_window);
         
+        // Check for _NET_WM_BYPASS_COMPOSITOR hint before storing window
+        // Also check if window should be fullscreen (games often set bypass + fullscreen)
+        let bypass_compositor = self.wm.atoms.check_bypass_compositor(&self.conn, window_id).unwrap_or(false);
+        let mut needs_fullscreen = false;
+        
+        if bypass_compositor {
+            debug!("Window {} requests compositor bypass, unredirecting", window_id);
+            self.compositor.unredirect_window(composite_id);
+            
+            // Check EWMH state first
+            if !client.state.fullscreen {
+                if let Ok(reply) = self.conn.as_ref().get_property(
+                    false,
+                    window_id,
+                    self.wm.atoms.net_wm_state,
+                    AtomEnum::ATOM,
+                    0,
+                    1024,
+                )?.reply() {
+                    if let Some(mut value32) = reply.value32() {
+                        if value32.any(|atom| atom == self.wm.atoms._net_wm_state_fullscreen) {
+                            needs_fullscreen = true;
+                        }
+                    }
+                }
+            }
+            
+            // Also check geometry - if window is screen-sized, it's likely fullscreen
+            if !needs_fullscreen && !client.state.fullscreen {
+                let screen_width = self.screen_width as u32;
+                let screen_height = self.screen_height as u32;
+                if client.geometry.width >= screen_width.saturating_sub(20)
+                    && client.geometry.width <= screen_width + 20
+                    && client.geometry.height >= screen_height.saturating_sub(20)
+                    && client.geometry.height <= screen_height + 20
+                    && client.geometry.x <= 20 && client.geometry.y <= 20 {
+                    needs_fullscreen = true;
+                }
+            }
+        }
+        
         // Store window
         self.wm_windows.insert(window_id, client);
         
-        // Check for _NET_WM_BYPASS_COMPOSITOR hint and unredirect if set
-        if let Ok(bypass) = self.wm.atoms.check_bypass_compositor(&self.conn, window_id) {
-            if bypass {
-                debug!("Window {} requests compositor bypass, unredirecting", window_id);
-                self.compositor.unredirect_window(composite_id);
+        // Set fullscreen if needed (after insert so we can get_mut)
+        if needs_fullscreen {
+            if let Some(client) = self.wm_windows.get_mut(&window_id) {
+                debug!("Window {} has bypass_compositor and fullscreen indication, setting fullscreen", window_id);
+                if let Err(err) = self.wm.set_fullscreen(&self.conn, client, true) {
+                    warn!("Failed to set fullscreen for window {}: {}", window_id, err);
+                }
             }
         }
         
@@ -1399,7 +1510,7 @@ impl AreaApp {
     /// Update _NET_CLIENT_LIST root property
     fn update_client_list(&mut self) -> Result<()> {
         let client_list: Vec<u32> = self.wm_windows.keys().copied().collect();
-        self.wm.update_client_list(&self.conn, self.root, &client_list)?;
+        self.wm.atoms.update_client_list(&self.conn, self.root, &client_list)?;
         self.conn.as_ref().flush()?;
         Ok(())
     }
@@ -1437,6 +1548,15 @@ impl AreaApp {
     
     /// Handle UnmapNotify event
     fn handle_unmap(&mut self, window_id: u32) -> Result<()> {
+        // If this window is in reparenting_windows, it's part of a fullscreen transition
+        // or other reparenting operation - don't unmanage it
+        if self.reparenting_windows.contains(&window_id) {
+            debug!("Ignoring unmap for window {} (part of reparenting operation)", window_id);
+            // Remove it from the set as the reparenting is complete
+            self.reparenting_windows.remove(&window_id);
+            return Ok(());
+        }
+        
         if let Some(mut client) = self.wm_windows.remove(&window_id) {
             // Track this window as being unmanaged (reparented back to root)
             // to ignore MapNotify events caused by the unparenting operation

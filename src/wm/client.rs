@@ -44,14 +44,20 @@ impl Client {
     }
 
     /// Calculate the full geometry of the window including its frame/decorations.
+    /// Returns client geometry directly if fullscreen (frame dimensions are 0 per xfwm4 approach).
     pub fn frame_geometry(&self) -> Geometry {
+        // If fullscreen, frame dimensions are effectively 0 (like xfwm4)
+        if self.state.fullscreen {
+            return self.geometry;
+        }
+        
         if self.frame.is_some() {
             // Frame extends beyond client by frame borders
             // TODO: Get actual frame dimensions from decorations module
-            const FRAME_LEFT: i32 = 5;
-            const FRAME_RIGHT: i32 = 5;
-            const FRAME_TOP: i32 = 30; // titlebar
-            const FRAME_BOTTOM: i32 = 5;
+            const FRAME_LEFT: i32 = 2;
+            const FRAME_RIGHT: i32 = 2;
+            const FRAME_TOP: i32 = 32; // titlebar
+            const FRAME_BOTTOM: i32 = 2;
 
             Geometry {
                 x: self.geometry.x - FRAME_LEFT,
