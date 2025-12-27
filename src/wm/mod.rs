@@ -35,7 +35,7 @@ struct DragState {
 pub struct WindowManager {
     screen_num: usize,
     root: u32,
-    atoms: Atoms,
+    pub atoms: Atoms,
     drag_state: Option<DragState>,
     /// WM owner window (for ICCCM selection)
     /// 
@@ -558,7 +558,6 @@ impl WindowManager {
         } else {
             // Window doesn't support WM_DELETE_WINDOW - force kill it
             warn!("Window {} doesn't support WM_DELETE_WINDOW protocol, force killing", window_id);
-            use x11rb::protocol::xproto;
             x11rb::protocol::xproto::kill_client(conn, window_id)?;
         }
         
@@ -586,6 +585,174 @@ impl WindowManager {
         Ok(())
     }
     
+    /// Set fullscreen state
+    pub fn set_fullscreen(
+        &mut self,
+        conn: &RustConnection,
+        client: &mut Client,
+        fullscreen: bool,
+    ) -> Result<()> {
+        debug!("Setting fullscreen={} for window {}", fullscreen, client.id);
+        
+        // If setting fullscreen, remove maximized state first (mutual exclusivity)
+        if fullscreen && client.state.maximized {
+            self.restore_window(conn, client)?;
+        }
+        
+        let screen = &conn.setup().roots[self.screen_num];
+        let screen_width = screen.width_in_pixels as u32;
+        let screen_height = screen.height_in_pixels as u32;
+        const PANEL_HEIGHT: i32 = 40; // TODO: Get from config
+        
+        if fullscreen {
+            // Entering fullscreen
+            
+            // Save current geometry if not already saved
+            if client.restore_geometry.is_none() {
+                // Save the current client geometry (before frame destruction)
+                // Save the current client geometry (before frame destruction)
+                // If there's a frame, the client geometry is relative to frame
+                // but we save it as-is since we'll restore to the same state
+                client.restore_geometry = Some(client.geometry);
+            }
+            
+            // Destroy frame if it exists (this reparents client back to root)
+            if let Some(frame_state) = &client.frame {
+                let frame = decorations::WindowFrame::from_state(client.id, frame_state);
+                if let Err(err) = frame.destroy(conn, screen.root) {
+                    warn!("Failed to destroy frame for fullscreen window {}: {}", client.id, err);
+                }
+                client.frame = None;
+            }
+            
+            // Resize window to exact screen dimensions (0, 0 to screen_width, screen_height)
+            client.geometry = Geometry {
+                x: 0,
+                y: 0,
+                width: screen_width,
+                height: screen_height,
+            };
+            
+            conn.configure_window(
+                client.id,
+                &ConfigureWindowAux::new()
+                    .x(0)
+                    .y(0)
+                    .width(screen_width)
+                    .height(screen_height)
+                    .border_width(0),
+            )?;
+            
+            // Set _NET_FRAME_EXTENTS to 0,0,0,0 for fullscreen
+            self.atoms.update_frame_extents(conn, client.id, 0, 0, 0, 0)?;
+            
+        } else {
+            // Exiting fullscreen
+            
+            // Restore saved geometry
+            if let Some(restore_geom) = client.restore_geometry {
+                client.geometry = restore_geom;
+                
+                // Resize window to restored geometry
+                conn.configure_window(
+                    client.id,
+                    &ConfigureWindowAux::new()
+                        .x(client.geometry.x)
+                        .y(client.geometry.y)
+                        .width(client.geometry.width)
+                        .height(client.geometry.height),
+                )?;
+            } else {
+                warn!("Exiting fullscreen for window {} but no restore geometry found", client.id);
+            }
+            
+            // Check if window should be decorated based on _NET_WM_WINDOW_TYPE
+            let window_types = self.atoms.get_window_type(conn, client.id).unwrap_or_default();
+            let mut should_decorate = true;
+            
+            for &win_type in &window_types {
+                if win_type == self.atoms._net_wm_window_type_dock ||
+                   win_type == self.atoms._net_wm_window_type_tooltip ||
+                   win_type == self.atoms._net_wm_window_type_notification ||
+                   win_type == self.atoms._net_wm_window_type_splash ||
+                   win_type == self.atoms._net_wm_window_type_menu ||
+                   win_type == self.atoms._net_wm_window_type_dropdown_menu ||
+                   win_type == self.atoms._net_wm_window_type_popup_menu {
+                    should_decorate = false;
+                    break;
+                }
+            }
+            
+            // Recreate frame if window should be decorated
+            if should_decorate {
+                let frame_y = if client.geometry.y < PANEL_HEIGHT {
+                    PANEL_HEIGHT as i16
+                } else {
+                    client.geometry.y as i16
+                };
+                
+                let dec_frame = decorations::WindowFrame::new(
+                    conn,
+                    screen,
+                    client.id,
+                    client.geometry.x as i16,
+                    frame_y,
+                    client.geometry.width as u16,
+                    client.geometry.height as u16,
+                    &self.config.decorations,
+                    &self.config.colors,
+                )?;
+                
+                // Convert to simple WindowFrame for storage
+                client.frame = Some(crate::shared::window_state::WindowFrame {
+                    frame: dec_frame.frame,
+                    titlebar: dec_frame.titlebar,
+                    close_button: dec_frame.close_button,
+                    maximize_button: dec_frame.maximize_button,
+                    minimize_button: dec_frame.minimize_button,
+                });
+                
+                // Update _NET_FRAME_EXTENTS to normal values
+                self.atoms.update_frame_extents(
+                    conn,
+                    client.id,
+                    self.config.decorations.border_width as u32,
+                    self.config.decorations.border_width as u32,
+                    self.config.decorations.titlebar_height as u32,
+                    self.config.decorations.border_width as u32,
+                )?;
+            } else {
+                // If not decorated, set _NET_FRAME_EXTENTS to 0
+                self.atoms.update_frame_extents(conn, client.id, 0, 0, 0, 0)?;
+            }
+            
+            // Clear restore geometry
+            client.restore_geometry = None;
+        }
+        
+        client.state.fullscreen = fullscreen;
+        
+        // Update EWMH state
+        if fullscreen {
+            self.atoms.set_window_state(
+                conn,
+                client.id,
+                &[self.atoms._net_wm_state_fullscreen],
+                &[self.atoms._net_wm_state_maximized_vert, self.atoms._net_wm_state_maximized_horz],
+            )?;
+        } else {
+            self.atoms.set_window_state(
+                conn,
+                client.id,
+                &[],
+                &[self.atoms._net_wm_state_fullscreen],
+            )?;
+        }
+        
+        conn.flush()?;
+        Ok(())
+    }
+    
     /// Maximize window
     pub fn maximize_window(
         &mut self,
@@ -593,7 +760,18 @@ impl WindowManager {
         client: &mut Client,
         top_offset: u32,
     ) -> Result<()> {
-        info!("Maximizing window {}", client.id);
+        debug!("Maximizing window {}", client.id);
+        
+        // If maximizing, remove fullscreen state first (mutual exclusivity)
+        if client.state.fullscreen {
+            client.state.fullscreen = false;
+            self.atoms.set_window_state(
+                conn,
+                client.id,
+                &[],
+                &[self.atoms._net_wm_state_fullscreen],
+            )?;
+        }
         
         // Save restore geometry
         if !client.state.maximized {

@@ -19,8 +19,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::ConnectionExt;
-use x11rb::protocol::xproto::ConfigureWindowAux;
+use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, ConfigureWindowAux};
 use x11rb::protocol::Event;
 use wm::client::Client;
 use compositor::c_window::CWindow;
@@ -542,82 +541,269 @@ impl AreaApp {
                 }
                 
                 // Handle _NET_WM_STATE (EWMH state change requests)
-                if let Ok(net_wm_state_atom) = self.conn.as_ref().intern_atom(false, b"_NET_WM_STATE")?.reply() {
-                    if e.type_ == net_wm_state_atom.atom && e.format == 32 {
-                        debug!("ClientMessage: _NET_WM_STATE for window {}", e.window);
-                        // Find the client window
-                        let client_id = self.wm.find_client_from_window(&self.wm_windows, e.window);
-                        if let Some(client_id) = client_id {
-                            let data32 = e.data.as_data32();
-                            let action = data32[0]; // 1=ADD, 2=REMOVE, 3=TOGGLE
-                            let first_atom = data32[1];
-                            let second_atom = data32[2];
-                            
-                            // Intern state atoms for comparison
-                            let fullscreen_atom = self.conn.as_ref().intern_atom(false, b"_NET_WM_STATE_FULLSCREEN")?.reply()?.atom;
-                            let max_vert_atom = self.conn.as_ref().intern_atom(false, b"_NET_WM_STATE_MAXIMIZED_VERT")?.reply()?.atom;
-                            let max_horz_atom = self.conn.as_ref().intern_atom(false, b"_NET_WM_STATE_MAXIMIZED_HORZ")?.reply()?.atom;
-                            let hidden_atom = self.conn.as_ref().intern_atom(false, b"_NET_WM_STATE_HIDDEN")?.reply()?.atom;
-                            
-                            // Handle FULLSCREEN
-                            if first_atom == fullscreen_atom || second_atom == fullscreen_atom {
-                                // For now, we just update the property - fullscreen handling is done via geometry
-                                // Apps can request fullscreen via this message
-                                debug!("_NET_WM_STATE FULLSCREEN requested (action={})", action);
-                                // The compositor will detect fullscreen via geometry or property changes
+                // EWMH spec: action = 0 (REMOVE), 1 (ADD), 2 (TOGGLE)
+                if e.type_ == self.wm.atoms.net_wm_state && e.format == 32 {
+                    debug!("ClientMessage: _NET_WM_STATE for window {}", e.window);
+                    // Find the client window
+                    let client_id = self.wm.find_client_from_window(&self.wm_windows, e.window);
+                    if let Some(client_id) = client_id {
+                        let data32 = e.data.as_data32();
+                        let action = data32[0]; // 0=REMOVE, 1=ADD, 2=TOGGLE (EWMH spec)
+                        let first_atom = data32[1];
+                        let second_atom = data32[2];
+                        
+                        // Clone atom values to avoid borrow checker issues
+                        let net_wm_state_fullscreen = self.wm.atoms._net_wm_state_fullscreen;
+                        let net_wm_state_maximized_vert = self.wm.atoms._net_wm_state_maximized_vert;
+                        let net_wm_state_maximized_horz = self.wm.atoms._net_wm_state_maximized_horz;
+                        let net_wm_state_hidden = self.wm.atoms._net_wm_state_hidden;
+                        let net_wm_state_above = self.wm.atoms._net_wm_state_above;
+                        let net_wm_state_below = self.wm.atoms._net_wm_state_below;
+                        let net_wm_state_shaded = self.wm.atoms._net_wm_state_shaded;
+                        let net_wm_state_sticky = self.wm.atoms._net_wm_state_sticky;
+                        let net_wm_state_modal = self.wm.atoms._net_wm_state_modal;
+                        let net_wm_state_skip_pager = self.wm.atoms._net_wm_state_skip_pager;
+                        let net_wm_state_skip_taskbar = self.wm.atoms._net_wm_state_skip_taskbar;
+                        let net_wm_state_demands_attention = self.wm.atoms._net_wm_state_demands_attention;
+                        let net_wm_state_atom = self.wm.atoms.net_wm_state;
+                        
+                        let mut state_changed = false;
+                        
+                        // Helper to determine if we should apply a state change
+                        let should_apply = |current: bool, action: u32| -> bool {
+                            match action {
+                                0 => current,      // REMOVE: only if currently set
+                                1 => !current,    // ADD: only if not currently set
+                                2 => true,        // TOGGLE: always apply
+                                _ => false,
                             }
-                            
-                            // Handle MAXIMIZE
-                            if (first_atom == max_vert_atom || second_atom == max_vert_atom) ||
-                               (first_atom == max_horz_atom || second_atom == max_horz_atom) {
-                                if let Some(client) = self.wm_windows.get(&client_id) {
-                                    let is_maximized = client.state.maximized;
-                                    let should_maximize = match action {
-                                        1 => !is_maximized, // ADD
-                                        2 => is_maximized,  // REMOVE
-                                        3 => !is_maximized, // TOGGLE
-                                        _ => false,
-                                    };
-                                    
-                                    if should_maximize && !is_maximized {
-                                        if let Err(err) = self.wm.maximize_window(&self.conn, self.wm_windows.get_mut(&client_id).unwrap(), self.shell.panel.height() as u32) {
-                                            warn!("Failed to maximize window {} via _NET_WM_STATE: {}", client_id, err);
-                                        }
-                                    } else if !should_maximize && is_maximized {
-                                        if let Err(err) = self.wm.restore_window(&self.conn, self.wm_windows.get_mut(&client_id).unwrap()) {
-                                            warn!("Failed to restore window {} via _NET_WM_STATE: {}", client_id, err);
+                        };
+                        
+                        // Handle FULLSCREEN (mutually exclusive with MAXIMIZED)
+                        if first_atom == net_wm_state_fullscreen || second_atom == net_wm_state_fullscreen {
+                            if let Some(client) = self.wm_windows.get(&client_id) {
+                                let current = client.state.fullscreen;
+                                let should_change = should_apply(current, action);
+                                
+                                if should_change {
+                                    if let Some(client) = self.wm_windows.get_mut(&client_id) {
+                                        if let Err(err) = self.wm.set_fullscreen(&self.conn, client, !current) {
+                                            warn!("Failed to set fullscreen for window {}: {}", client_id, err);
+                                        } else {
+                                            state_changed = true;
+                                            // Coordinate with compositor: unredirect/redirect based on fullscreen state
+                                            let target_id = client.frame.as_ref().map(|f| f.frame).unwrap_or(client_id);
+                                            if !current {
+                                                // Entering fullscreen - unredirect if config allows
+                                                if self.config.compositor.unredirect_fullscreen {
+                                                    self.compositor.unredirect_window(target_id);
+                                                }
+                                            } else {
+                                                // Exiting fullscreen - redirect back
+                                                if self.config.compositor.unredirect_fullscreen {
+                                                    self.compositor.redirect_window(target_id);
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
-                            
-                            // Handle HIDDEN (minimize)
-                            if first_atom == hidden_atom || second_atom == hidden_atom {
-                                if let Some(client) = self.wm_windows.get(&client_id) {
-                                    let is_minimized = !client.mapped;
-                                    let should_minimize = match action {
-                                        1 => !is_minimized, // ADD
-                                        2 => is_minimized,  // REMOVE
-                                        3 => !is_minimized, // TOGGLE
-                                        _ => false,
-                                    };
-                                    
-                                    if should_minimize && !is_minimized {
-                                        if let Err(err) = self.wm.minimize_window(&self.conn, &mut self.wm_windows, client_id) {
-                                            warn!("Failed to minimize window {} via _NET_WM_STATE: {}", client_id, err);
-                                        }
-                                    } else if !should_minimize && is_minimized {
-                                        if let Err(err) = self.wm.restore_window(&self.conn, self.wm_windows.get_mut(&client_id).unwrap()) {
-                                            warn!("Failed to restore window {} via _NET_WM_STATE: {}", client_id, err);
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            debug!("_NET_WM_STATE for unmanaged window {}", e.window);
                         }
-                        return Ok(());
+                        
+                        // Handle MAXIMIZE (mutually exclusive with FULLSCREEN)
+                        let handle_maximize = (first_atom == net_wm_state_maximized_vert || second_atom == net_wm_state_maximized_vert) ||
+                                             (first_atom == net_wm_state_maximized_horz || second_atom == net_wm_state_maximized_horz);
+                        if handle_maximize {
+                            if let Some(client) = self.wm_windows.get(&client_id) {
+                                let current = client.state.maximized;
+                                let should_change = should_apply(current, action);
+                                
+                                if should_change {
+                                    if let Some(client) = self.wm_windows.get_mut(&client_id) {
+                                        if current {
+                                            if let Err(err) = self.wm.restore_window(&self.conn, client) {
+                                                warn!("Failed to restore window {}: {}", client_id, err);
+                                            } else {
+                                                state_changed = true;
+                                            }
+                                        } else {
+                                            if let Err(err) = self.wm.maximize_window(&self.conn, client, self.shell.panel.height() as u32) {
+                                                warn!("Failed to maximize window {}: {}", client_id, err);
+                                            } else {
+                                                state_changed = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Handle HIDDEN (minimize)
+                        if first_atom == net_wm_state_hidden || second_atom == net_wm_state_hidden {
+                            if let Some(client) = self.wm_windows.get(&client_id) {
+                                let current = !client.mapped;
+                                let should_change = should_apply(current, action);
+                                
+                                if should_change {
+                                    if current {
+                                        // Unminimize (restore)
+                                        if let Some(client) = self.wm_windows.get_mut(&client_id) {
+                                            if let Err(err) = self.wm.restore_window(&self.conn, client) {
+                                                warn!("Failed to restore window {}: {}", client_id, err);
+                                            } else {
+                                                // Map the window
+                                                if let Some(frame) = &client.frame {
+                                                    self.conn.as_ref().map_window(frame.frame)?;
+                                                } else {
+                                                    self.conn.as_ref().map_window(client_id)?;
+                                                }
+                                                client.mapped = true;
+                                                client.state.minimized = false;
+                                                self.conn.as_ref().flush()?;
+                                                state_changed = true;
+                                            }
+                                        }
+                                    } else {
+                                        // Minimize
+                                        if let Err(err) = self.wm.minimize_window(&self.conn, &mut self.wm_windows, client_id) {
+                                            warn!("Failed to minimize window {}: {}", client_id, err);
+                                        } else {
+                                            state_changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Handle ABOVE (mutually exclusive with BELOW)
+                        if first_atom == net_wm_state_above || second_atom == net_wm_state_above {
+                            if let Some(client) = self.wm_windows.get_mut(&client_id) {
+                                let current = client.state.above;
+                                let should_change = should_apply(current, action);
+                                
+                                if should_change {
+                                    // Remove BELOW if setting ABOVE
+                                    if !current && client.state.below {
+                                        client.state.below = false;
+                                        self.wm.atoms.set_window_state(
+                                            &self.conn,
+                                            client_id,
+                                            &[],
+                                            &[net_wm_state_below],
+                                        )?;
+                                    }
+                                    
+                                    client.state.above = !current;
+                                    let (add_atoms, remove_atoms) = if !current {
+                                        (&[net_wm_state_above] as &[u32], &[] as &[u32])
+                                    } else {
+                                        (&[] as &[u32], &[net_wm_state_above] as &[u32])
+                                    };
+                                    self.wm.atoms.set_window_state(
+                                        &self.conn,
+                                        client_id,
+                                        add_atoms,
+                                        remove_atoms,
+                                    )?;
+                                    self.conn.as_ref().flush()?;
+                                    state_changed = true;
+                                }
+                            }
+                        }
+                        
+                        // Handle BELOW (mutually exclusive with ABOVE)
+                        if first_atom == net_wm_state_below || second_atom == net_wm_state_below {
+                            if let Some(client) = self.wm_windows.get_mut(&client_id) {
+                                let current = client.state.below;
+                                let should_change = should_apply(current, action);
+                                
+                                if should_change {
+                                    // Remove ABOVE if setting BELOW
+                                    if !current && client.state.above {
+                                        client.state.above = false;
+                                        self.wm.atoms.set_window_state(
+                                            &self.conn,
+                                            client_id,
+                                            &[],
+                                            &[net_wm_state_above],
+                                        )?;
+                                    }
+                                    
+                                    client.state.below = !current;
+                                    let (add_atoms, remove_atoms) = if !current {
+                                        (&[net_wm_state_below] as &[u32], &[] as &[u32])
+                                    } else {
+                                        (&[] as &[u32], &[net_wm_state_below] as &[u32])
+                                    };
+                                    self.wm.atoms.set_window_state(
+                                        &self.conn,
+                                        client_id,
+                                        add_atoms,
+                                        remove_atoms,
+                                    )?;
+                                    self.conn.as_ref().flush()?;
+                                    state_changed = true;
+                                }
+                            }
+                        }
+                        
+                        // Handle other states (SHADED, STICKY, MODAL, SKIP_PAGER, SKIP_TASKBAR, DEMANDS_ATTENTION)
+                        // These are property-only states (no visual changes needed yet)
+                        let property_only_states = [
+                            (net_wm_state_shaded, "shaded"),
+                            (net_wm_state_sticky, "sticky"),
+                            (net_wm_state_modal, "modal"),
+                            (net_wm_state_skip_pager, "skip_pager"),
+                            (net_wm_state_skip_taskbar, "skip_taskbar"),
+                            (net_wm_state_demands_attention, "demands_attention"),
+                        ];
+                        
+                        for (atom, state_name) in property_only_states.iter() {
+                            if first_atom == *atom || second_atom == *atom {
+                                if let Some(_client) = self.wm_windows.get_mut(&client_id) {
+                                    // Get current state from property
+                                    let mut current = false;
+                                    if let Ok(reply) = self.conn.as_ref().get_property(
+                                        false,
+                                        client_id,
+                                        net_wm_state_atom,
+                                        AtomEnum::ATOM,
+                                        0,
+                                        1024,
+                                    )?.reply() {
+                                        if let Some(mut value32) = reply.value32() {
+                                            current = value32.any(|a| a == *atom);
+                                        }
+                                    }
+                                    
+                                    let should_change = should_apply(current, action);
+                                    if should_change {
+                                        let (add_atoms, remove_atoms) = if !current {
+                                            (&[*atom] as &[u32], &[] as &[u32])
+                                        } else {
+                                            (&[] as &[u32], &[*atom] as &[u32])
+                                        };
+                                        self.wm.atoms.set_window_state(
+                                            &self.conn,
+                                            client_id,
+                                            add_atoms,
+                                            remove_atoms,
+                                        )?;
+                                        self.conn.as_ref().flush()?;
+                                        debug!("Updated {} state for window {} to {}", state_name, client_id, !current);
+                                        state_changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if !state_changed {
+                            debug!("_NET_WM_STATE action {} for window {} resulted in no change", action, client_id);
+                        }
+                    } else {
+                        debug!("_NET_WM_STATE for unmanaged window {}", e.window);
                     }
+                    return Ok(());
                 }
                 
                 // Handle _NET_ACTIVE_WINDOW (EWMH focus request)
@@ -897,6 +1083,46 @@ impl AreaApp {
                     e.height as u32
                 );
                 self.compositor.update_window_geometry(e.window, geom);
+                
+                // Geometry-based fullscreen detection: if window resizes to screen size, trigger fullscreen
+                // This handles games that resize first, then set EWMH property
+                if let Some(client) = self.wm_windows.get_mut(&e.window) {
+                    // Check if window geometry matches screen size (within 1px tolerance for rounding)
+                    let screen_width = self.screen_width as u32;
+                    let screen_height = self.screen_height as u32;
+                    let is_screen_size = e.width >= (screen_width as u16).saturating_sub(1) 
+                                      && e.width <= (screen_width as u16) + 1
+                                      && e.height >= (screen_height as u16).saturating_sub(1)
+                                      && e.height <= (screen_height as u16) + 1
+                                      && e.x <= 1 && e.y <= 1;
+                    
+                    // Only auto-detect if not already fullscreen
+                    if is_screen_size && !client.state.fullscreen {
+                        debug!("Geometry-based fullscreen detection: window {} resized to screen size, setting fullscreen", e.window);
+                        if let Err(err) = self.wm.set_fullscreen(&self.conn, client, true) {
+                            warn!("Failed to set fullscreen for window {} (geometry-based detection): {}", e.window, err);
+                        } else {
+                            // Coordinate with compositor: unredirect if config allows
+                            let target_id = client.frame.as_ref().map(|f| f.frame).unwrap_or(e.window);
+                            if self.config.compositor.unredirect_fullscreen {
+                                self.compositor.unredirect_window(target_id);
+                            }
+                        }
+                    } else if !is_screen_size && client.state.fullscreen {
+                        // Window is no longer screen size but is marked fullscreen - exit fullscreen
+                        // (This handles cases where games resize out of fullscreen before clearing EWMH state)
+                        debug!("Geometry-based fullscreen detection: window {} no longer screen size, exiting fullscreen", e.window);
+                        if let Err(err) = self.wm.set_fullscreen(&self.conn, client, false) {
+                            warn!("Failed to exit fullscreen for window {} (geometry-based detection): {}", e.window, err);
+                        } else {
+                            // Coordinate with compositor: redirect back
+                            let target_id = client.frame.as_ref().map(|f| f.frame).unwrap_or(e.window);
+                            if self.config.compositor.unredirect_fullscreen {
+                                self.compositor.redirect_window(target_id);
+                            }
+                        }
+                    }
+                }
             }
             
             Event::KeyPress(e) => {
@@ -975,6 +1201,22 @@ impl AreaApp {
                             e.window
                         };
                         self.compositor.update_window_state(target_id);
+                    }
+                }
+                
+                // Check if _NET_WM_BYPASS_COMPOSITOR changed
+                if e.atom == self.wm.atoms._net_wm_bypass_compositor {
+                    if let Some(client) = self.wm_windows.get(&e.window) {
+                        let composite_id = client.frame.as_ref().map(|f| f.frame).unwrap_or(e.window);
+                        if let Ok(bypass) = self.wm.atoms.check_bypass_compositor(&self.conn, e.window) {
+                            if bypass {
+                                debug!("PropertyNotify: _NET_WM_BYPASS_COMPOSITOR set for window {}, unredirecting", e.window);
+                                self.compositor.unredirect_window(composite_id);
+                            } else {
+                                debug!("PropertyNotify: _NET_WM_BYPASS_COMPOSITOR cleared for window {}, redirecting", e.window);
+                                self.compositor.redirect_window(composite_id);
+                            }
+                        }
                     }
                 }
             }
@@ -1138,6 +1380,14 @@ impl AreaApp {
         
         // Store window
         self.wm_windows.insert(window_id, client);
+        
+        // Check for _NET_WM_BYPASS_COMPOSITOR hint and unredirect if set
+        if let Ok(bypass) = self.wm.atoms.check_bypass_compositor(&self.conn, window_id) {
+            if bypass {
+                debug!("Window {} requests compositor bypass, unredirecting", window_id);
+                self.compositor.unredirect_window(composite_id);
+            }
+        }
         
         // Update _NET_CLIENT_LIST
         self.update_client_list()?;

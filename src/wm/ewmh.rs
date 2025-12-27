@@ -37,7 +37,17 @@ pub struct Atoms {
     pub _net_wm_state_fullscreen: Atom,
     pub _net_wm_state_maximized_vert: Atom,
     pub _net_wm_state_maximized_horz: Atom,
+    pub _net_wm_state_hidden: Atom,
+    pub _net_wm_state_shaded: Atom,
+    pub _net_wm_state_sticky: Atom,
+    pub _net_wm_state_modal: Atom,
+    pub _net_wm_state_skip_pager: Atom,
+    pub _net_wm_state_skip_taskbar: Atom,
+    pub _net_wm_state_above: Atom,
+    pub _net_wm_state_below: Atom,
+    pub _net_wm_state_demands_attention: Atom,
     pub net_frame_extents: Atom,
+    pub _net_wm_bypass_compositor: Atom,
     pub _net_close_window: Atom,
     pub _wm_protocols: Atom,
     pub _wm_delete_window: Atom,
@@ -76,7 +86,17 @@ impl Atoms {
             _net_wm_state_fullscreen: intern("_NET_WM_STATE_FULLSCREEN")?,
             _net_wm_state_maximized_vert: intern("_NET_WM_STATE_MAXIMIZED_VERT")?,
             _net_wm_state_maximized_horz: intern("_NET_WM_STATE_MAXIMIZED_HORZ")?,
+            _net_wm_state_hidden: intern("_NET_WM_STATE_HIDDEN")?,
+            _net_wm_state_shaded: intern("_NET_WM_STATE_SHADED")?,
+            _net_wm_state_sticky: intern("_NET_WM_STATE_STICKY")?,
+            _net_wm_state_modal: intern("_NET_WM_STATE_MODAL")?,
+            _net_wm_state_skip_pager: intern("_NET_WM_STATE_SKIP_PAGER")?,
+            _net_wm_state_skip_taskbar: intern("_NET_WM_STATE_SKIP_TASKBAR")?,
+            _net_wm_state_above: intern("_NET_WM_STATE_ABOVE")?,
+            _net_wm_state_below: intern("_NET_WM_STATE_BELOW")?,
+            _net_wm_state_demands_attention: intern("_NET_WM_STATE_DEMANDS_ATTENTION")?,
             net_frame_extents: intern("_NET_FRAME_EXTENTS")?,
+            _net_wm_bypass_compositor: intern("_NET_WM_BYPASS_COMPOSITOR")?,
             _net_close_window: intern("_NET_CLOSE_WINDOW")?,
             _wm_protocols: intern("WM_PROTOCOLS")?,
             _wm_delete_window: intern("WM_DELETE_WINDOW")?,
@@ -100,6 +120,18 @@ impl Atoms {
             self.net_wm_desktop,
             self.net_wm_window_type,
             self.net_wm_state,
+            self._net_wm_state_fullscreen,
+            self._net_wm_state_maximized_vert,
+            self._net_wm_state_maximized_horz,
+            self._net_wm_state_hidden,
+            self._net_wm_state_shaded,
+            self._net_wm_state_sticky,
+            self._net_wm_state_modal,
+            self._net_wm_state_skip_pager,
+            self._net_wm_state_skip_taskbar,
+            self._net_wm_state_above,
+            self._net_wm_state_below,
+            self._net_wm_state_demands_attention,
             self.net_frame_extents,
         ];
 
@@ -172,6 +204,7 @@ impl Atoms {
 
 
     /// Set window state (add/remove EWMH states)
+    /// This updates the _NET_WM_STATE property and sends PropertyNotify
     pub fn set_window_state<C: Connection>(
         &self,
         conn: &C,
@@ -206,7 +239,7 @@ impl Atoms {
             }
         }
         
-        // Set new state
+        // Set new state (this will trigger PropertyNotify automatically)
         conn.change_property32(
             PropMode::REPLACE,
             window,
@@ -276,8 +309,9 @@ impl Atoms {
         
         Ok(())
     }
-
-    /// Get window type (_NET_WM_WINDOW_TYPE)
+    
+    /// Get _NET_WM_WINDOW_TYPE property for a window
+    /// Returns a vector of window type atoms
     pub fn get_window_type<C: Connection>(
         &self,
         conn: &C,
@@ -295,6 +329,31 @@ impl Atoms {
                 return Ok(value32.collect());
             }
         }
-        Ok(Vec::new())
+        Ok(vec![])
+    }
+    
+    /// Check if a window has _NET_WM_BYPASS_COMPOSITOR set to 1
+    /// Returns true if the window requests compositor bypass
+    pub fn check_bypass_compositor<C: Connection>(
+        &self,
+        conn: &C,
+        window: Window,
+    ) -> Result<bool> {
+        if let Ok(reply) = conn.get_property(
+            false,
+            window,
+            self._net_wm_bypass_compositor,
+            AtomEnum::CARDINAL,
+            0,
+            1,
+        )?.reply() {
+            if let Some(mut value32) = reply.value32() {
+                if let Some(value) = value32.next() {
+                    // Value 1 means bypass compositor
+                    return Ok(value == 1);
+                }
+            }
+        }
+        Ok(false)
     }
 }

@@ -33,5 +33,14 @@ pub struct WindowFrame {
 pub struct WindowFlags {
     pub maximized: bool,
     pub minimized: bool,
+    pub fullscreen: bool,
+    pub shaded: bool,
+    pub sticky: bool,
+    pub modal: bool,
+    pub skip_pager: bool,
+    pub skip_taskbar: bool,
+    pub above: bool,
+    pub below: bool,
+    pub demands_attention: bool,
 }
 

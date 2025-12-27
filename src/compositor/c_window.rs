@@ -42,6 +42,9 @@ pub struct CWindow {
     
     /// Is the window redirected?
     pub redirected: bool,
+    
+    /// Is the window unredirected (bypassing compositor)?
+    pub unredirected: bool,
 }
 
 impl CWindow {
@@ -58,6 +61,7 @@ impl CWindow {
             damaged: false,
             bind_failed: false,
             redirected: false,
+            unredirected: false,
         }
     }
 

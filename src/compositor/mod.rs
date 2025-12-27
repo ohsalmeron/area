@@ -12,7 +12,7 @@ pub mod cursor;
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use x11rb::protocol::composite::{self, ConnectionExt as CompositeExt};
 use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
 use x11rb::protocol::xproto::*;
@@ -37,6 +37,10 @@ pub enum CompositorCommand {
     UpdateWindowDamage(u32),
     /// Update window state (for fullscreen detection)
     UpdateWindowState(u32),
+    /// Unredirect a window (bypass compositor for performance)
+    UnredirectWindow(u32),
+    /// Redirect a window (re-enable compositing)
+    RedirectWindow(u32),
     /// Update cursor position and visibility
     UpdateCursor(i16, i16, bool),
     /// Update cursor image (shape change detected)
@@ -69,6 +73,10 @@ struct CompositorInner {
     force_render: bool,
     /// EWMH atoms (cached for performance)
     ewmh_atoms: Option<crate::wm::ewmh::Atoms>,
+    /// Count of unredirected windows (for overlay window visibility management)
+    unredirected_count: u32,
+    /// Whether to unredirect fullscreen windows (from config)
+    unredirect_fullscreen: bool,
 }
 
 impl Compositor {
@@ -140,6 +148,14 @@ impl Compositor {
         let _ = self.tx.send(CompositorCommand::UpdateWindowState(window_id));
     }
 
+    pub fn unredirect_window(&self, window_id: u32) {
+        let _ = self.tx.send(CompositorCommand::UnredirectWindow(window_id));
+    }
+
+    pub fn redirect_window(&self, window_id: u32) {
+        let _ = self.tx.send(CompositorCommand::RedirectWindow(window_id));
+    }
+
     pub fn update_cursor(&self, x: i16, y: i16, visible: bool) {
         let _ = self.tx.send(CompositorCommand::UpdateCursor(x, y, visible));
     }
@@ -199,6 +215,8 @@ impl CompositorInner {
             rx,
             force_render: true, // Initial render
             ewmh_atoms,
+            unredirected_count: 0,
+            unredirect_fullscreen: false, // TODO: Pass from config
         }
     }
 
@@ -271,6 +289,11 @@ impl CompositorInner {
             }
             CompositorCommand::RemoveWindow(id) => {
                 if let Some(w) = self.windows.remove(&id) {
+                    // If window was unredirected, decrement count
+                    if w.unredirected && self.unredirected_count > 0 {
+                        self.unredirected_count -= 1;
+                    }
+                    
                     // Clean up damage object
                     if let Some(d) = w.damage {
                         let _ = self.conn.as_ref().damage_destroy(d);
@@ -327,6 +350,12 @@ impl CompositorInner {
             }
             CompositorCommand::UpdateWindowState(id) => {
                 self.handle_window_state_update(id);
+            }
+            CompositorCommand::UnredirectWindow(id) => {
+                self.unredirect_window(id);
+            }
+            CompositorCommand::RedirectWindow(id) => {
+                self.redirect_window(id);
             }
             CompositorCommand::UpdateCursor(x, y, visible) => {
                 if let Some(ref mut c) = self.cursor_manager {
@@ -389,6 +418,61 @@ impl CompositorInner {
         if let Some(window) = self.windows.get_mut(&window_id) {
             window.damaged = true;
             debug!("Window {} state changed, marked for re-render", window_id);
+        }
+    }
+    
+    /// Unredirect a window (allow it to render directly, bypassing compositor)
+    fn unredirect_window(&mut self, window_id: u32) {
+        if let Some(window) = self.windows.get_mut(&window_id) {
+            if window.unredirected {
+                // Already unredirected
+                return;
+            }
+            
+            // Unredirect the window using Composite extension
+            if let Err(e) = self.conn.as_ref().composite_unredirect_window(
+                window_id,
+                composite::Redirect::MANUAL,
+            ) {
+                warn!("Failed to unredirect window {}: {}", window_id, e);
+                return;
+            }
+            
+            window.unredirected = true;
+            window.redirected = false;
+            self.unredirected_count += 1;
+            
+            // Update overlay window visibility if needed
+            // When we have unredirected windows, overlay should be visible
+            // (The overlay window is used for compositing, so we need it even with unredirected windows)
+            debug!("Unredirected window {} (count: {})", window_id, self.unredirected_count);
+        }
+    }
+    
+    /// Redirect a window (re-enable compositing)
+    fn redirect_window(&mut self, window_id: u32) {
+        if let Some(window) = self.windows.get_mut(&window_id) {
+            if !window.unredirected {
+                // Already redirected
+                return;
+            }
+            
+            // Redirect the window using Composite extension
+            if let Err(e) = self.conn.as_ref().composite_redirect_window(
+                window_id,
+                composite::Redirect::MANUAL,
+            ) {
+                warn!("Failed to redirect window {}: {}", window_id, e);
+                return;
+            }
+            
+            window.unredirected = false;
+            window.redirected = true;
+            if self.unredirected_count > 0 {
+                self.unredirected_count -= 1;
+            }
+            
+            debug!("Redirected window {} (count: {})", window_id, self.unredirected_count);
         }
     }
 
@@ -558,6 +642,11 @@ impl CompositorInner {
             windows_to_render.sort_by_key(|w| w.id);
             
             for window in windows_to_render {
+                // Skip unredirected windows (they render directly, bypassing compositor)
+                if window.unredirected {
+                    continue;
+                }
+                
                 // Check if window is fullscreen (geometry-based OR EWMH state)
                 // EWMH state check is important because windows can request fullscreen before resizing
                 let is_fullscreen_geometry = window.is_fullscreen(screen_width as u16, screen_height as u16);
