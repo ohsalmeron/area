@@ -1,21 +1,47 @@
 # Area
 
-> A Bevy-powered X11 desktop environment with Compiz Fusion-style effects.
+> The fastest lightweight desktop environment.
 
-![Status](https://img.shields.io/badge/status-MVP%20in%20progress-yellow)
-![Platform](https://img.shields.io/badge/platform-Linux%20%2B%20X11-blue)
-![Rust](https://img.shields.io/badge/rust-2024%20edition-orange)
+A high-performance X11 window manager with built-in OpenGL compositor, written in Rust. Provides a stable ecosystem to run all kinds of apps with a Windows-like experience and feel.
 
-## Vision
+## Features
 
-Area brings back the glory days of Compiz Fusion and Emerald — wobbly windows, desktop cube, smooth animations — but built with modern Rust and a game engine (Bevy) for maximum performance.
+### ✅ Implemented
 
-### What makes Area different?
+**Window Management**
+- Full EWMH/ICCCM compliance for maximum app compatibility
+- Window decorations (titlebar, close/maximize/minimize buttons)
+- Window operations: move, resize, maximize, minimize, fullscreen
+- Window dragging (Alt + Left Drag) and resizing (Alt + Right Drag)
+- Double-click titlebar to maximize/restore
+- Window state management (above, below, sticky, skip taskbar, etc.)
+- Fullscreen support with compositor bypass for games
+- Window focus and stacking management
 
-- **Bevy-powered shell**: Real-time GPU-accelerated UI with game engine capabilities
-- **X11 compatibility**: Works with all your existing Linux apps (Chromium, Firefox, Steam, etc.)
-- **Agentic overlays**: Context-aware suggestions for terminal commands, build actions, git operations
-- **Mobile-friendly UX**: Touch-friendly interactions, tap-to-run commands
+**Compositor**
+- OpenGL-based compositor with DRI3 support
+- Damage tracking for efficient rendering
+- Cursor management with shape updates
+- Window texture management
+- FPS monitoring
+- VSync support
+
+**Shell**
+- Top panel/bar (configurable position, height, opacity, color)
+- Logout dialog with power management (shutdown, reboot, suspend)
+- Click handling for shell elements
+
+**Desktop Integration**
+- D-Bus integration (notifications, power management)
+- Configuration system (TOML-based, auto-generated defaults)
+- Mouse input configuration (acceleration, profile, left-handed)
+- Launcher keybinding (Super key, configurable)
+- Workspace support (EWMH desktops)
+
+**System Services**
+- Desktop notifications (org.freedesktop.Notifications)
+- Power management (org.freedesktop.login1, UPower)
+- Graceful shutdown handling
 
 ## Architecture
 
@@ -27,18 +53,25 @@ Area brings back the glory days of Compiz Fusion and Emerald — wobbly windows,
 ┌─────────────────▼───────────────────────────────────┐
 │              area-wm (Window Manager)                │
 │  • Window management (move, resize, focus)          │
-│  • Workspaces                                       │
-│  • EWMH compliance                                  │
+│  • Workspaces (EWMH desktops)                       │
+│  • EWMH/ICCCM compliance                            │
+│  • Window decorations                               │
 │  • Keybindings                                      │
 └─────────────────┬───────────────────────────────────┘
-                  │ Unix Socket IPC (area-ipc)
+                  │ Async Event Stream
 ┌─────────────────▼───────────────────────────────────┐
-│              area-shell (Bevy UI)                    │
-│  • Top bar with workspace switcher + clock          │
-│  • Overview mode (Expo-style window grid)           │
-│  • App launcher with fuzzy search                   │
-│  • Agent overlays (WIP)                             │
-│  • Animations & effects (WIP)                       │
+│            area-compositor (OpenGL)                  │
+│  • GPU-accelerated rendering                        │
+│  • Damage tracking                                  │
+│  • Cursor management                                │
+│  • Window textures                                  │
+└─────────────────┬───────────────────────────────────┘
+                  │ Direct Rendering
+┌─────────────────▼───────────────────────────────────┐
+│              area-shell (Shell UI)                   │
+│  • Top panel/bar                                    │
+│  • Logout dialog                                    │
+│  • Power management                                 │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -48,7 +81,7 @@ Area brings back the glory days of Compiz Fusion and Emerald — wobbly windows,
 
 - Rust 2024 edition (nightly)
 - X11 development libraries
-- Vulkan-capable GPU
+- OpenGL/Vulkan-capable GPU
 
 ```bash
 # Arch Linux
@@ -61,19 +94,12 @@ sudo apt install build-essential libx11-dev libxcb1-dev libvulkan1
 ### Build
 
 ```bash
-# Clone
-git clone https://github.com/bizkit/area
-cd area
-
-# Build all crates
 cargo build --release
 ```
 
 ## Installation
 
-### LightDM Session (Recommended)
-
-The easiest way to set up Area as a desktop session is using the installation script:
+### LightDM Session
 
 ```bash
 # User installation (installs to ~/.local)
@@ -83,13 +109,6 @@ The easiest way to set up Area as a desktop session is using the installation sc
 sudo ./scripts/install-session.sh
 ```
 
-The script will:
-- Build release binaries (`area-wm`, `area-shell`)
-- Build and install `navigator` (app launcher) if `xfce-rs` is available
-- Install systemd user service files
-- Install LightDM session file
-- Set up proper permissions
-
 **After installation:**
 1. Log out from your current session
 2. Select "Area" from the LightDM session menu
@@ -98,54 +117,26 @@ The script will:
 **Viewing logs:**
 ```bash
 # Window manager logs
-journalctl --user -u area-wm
+journalctl --user -u area-wm -f
 
 # Shell logs
-journalctl --user -u area-shell
-
-# Follow logs in real-time
-journalctl --user -u area-wm -f
+journalctl --user -u area-shell -f
 ```
 
-### Manual Installation
+## Configuration
 
-If you prefer to install manually:
+Configuration is stored in `~/.config/area/config.toml` and is auto-generated on first run with sensible defaults.
 
-```bash
-# Build binaries
-cargo build --release
+### Key Settings
 
-# Install binaries
-sudo install -Dm755 target/release/area-wm /usr/local/bin/
-sudo install -Dm755 target/release/area-shell /usr/local/bin/
-sudo install -Dm755 session/area-session /usr/local/bin/
+- **Mouse**: Acceleration, profile, left-handed mode
+- **Window Decorations**: Titlebar height, border width, button sizes
+- **Window Colors**: Background, titlebar, border, button colors
+- **Panel**: Height, position, opacity, color
+- **Keybindings**: Launcher key and command
+- **Compositor**: VSync, tear-free, fullscreen unredirect
 
-# Install systemd services (user)
-mkdir -p ~/.config/systemd/user
-cp session/*.service session/*.target ~/.config/systemd/user/
-systemctl --user daemon-reload
-
-# Install LightDM session
-sudo install -Dm644 session/area.desktop /usr/share/xsessions/
-```
-
-## Running
-
-### Testing (without replacing your current DE)
-
-```bash
-# In a nested X server (Xephyr)
-Xephyr :1 -screen 1920x1080 &
-DISPLAY=:1 cargo run --bin area-wm &
-DISPLAY=:1 cargo run --bin area-shell
-```
-
-### As your session
-
-1. Install using the script (see above)
-2. Log out
-3. Select "Area" from LightDM
-4. Log in
+See `CONFIG.md` for the complete configuration reference.
 
 ## Keybindings
 
@@ -153,57 +144,34 @@ DISPLAY=:1 cargo run --bin area-shell
 |-----|--------|
 | `Alt + Left Drag` | Move window |
 | `Alt + Right Drag` | Resize window |
-| `Super + 1-4` | Switch workspace |
-| `Super + Return` | Launch terminal |
-| `F9` | Toggle overview mode |
-| `F10` | Toggle launcher |
+| `Super` | Launch launcher (configurable) |
+| `Double-click titlebar` | Toggle maximize |
 
 ## Roadmap
 
-### Milestone 1: Basic WM ✅
-- [x] X11 connection
-- [x] Window management
-- [x] Move/resize with Alt+drag
-- [x] Workspaces
+### ✅ Completed
+- [x] X11 window manager with EWMH/ICCCM compliance
+- [x] OpenGL compositor with damage tracking
+- [x] Window decorations and management
+- [x] Panel/bar with logout dialog
+- [x] D-Bus integration (notifications, power)
+- [x] Configuration system
+- [x] Mouse input configuration
+- [x] Workspace support
 
-### Milestone 2: IPC ✅
-- [x] Unix socket protocol
-- [x] WM → Shell events
-- [x] Shell → WM commands
+### 🔄 In Progress
+- [ ] System tray (StatusNotifierItem/SNI)
+- [ ] Desktop manager (icons, wallpaper)
+- [ ] Window snapping (Windows-style tiling)
 
-### Milestone 3: Bar 🔄
-- [x] Workspace indicator
-- [x] Active window title
-- [x] Clock
-- [ ] System tray
-
-### Milestone 4: Overview
-- [x] Basic grid layout
-- [ ] Smooth zoom animation
-- [ ] Window thumbnails
-- [ ] Drag to move between workspaces
-
-### Milestone 5: Launcher
-- [x] .desktop file scanning
-- [x] Fuzzy search
-- [x] Keyboard navigation
-- [ ] Icons
-
-### Milestone 6: Compiz Effects
-- [ ] Wobbly windows
-- [ ] Desktop cube
-- [ ] Window open/close animations
-- [ ] Blur & transparency
-
-### Milestone 7: Agent Overlays
-- [ ] Context detection
-- [ ] Suggested actions UI
-- [ ] Voice command indicator
-
-### Milestone 8: Nested DEs (v2)
-- [ ] Xephyr integration (run other DEs in workspace)
-- [ ] VNC/RDP window support
-- [ ] Per-workspace DE switching
+### 📋 Planned
+- [ ] Taskbar/window list with previews
+- [ ] Session management (save/restore windows)
+- [ ] Multi-monitor support
+- [ ] Startup notifications
+- [ ] File associations & MIME types
+- [ ] Overview mode enhancements
+- [ ] Compiz effects (wobbly windows, cube, etc.)
 
 ## License
 

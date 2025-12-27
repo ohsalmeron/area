@@ -253,6 +253,7 @@ impl AreaApp {
         // Event buffer for batching events (LeftWM pattern)
         let mut event_buffer: Vec<Event> = Vec::new();
         let mut needs_render = false; // Will be set to true when events require rendering
+        let mut should_exit = false; // Flag to signal clean exit when connection is lost
         
         // Periodic scan for unmanaged windows (every 2 seconds)
         let mut scan_interval = tokio::time::interval(Duration::from_secs(2));
@@ -270,8 +271,21 @@ impl AreaApp {
         self.compositor.trigger_render();
         
         loop {
+            // Check exit flag
+            if should_exit {
+                info!("Exiting main loop");
+                return Ok(());
+            }
+            
             // Flush X11 requests at start of loop (LeftWM pattern - batch optimization)
             if let Err(e) = self.x11_stream.flush() {
+                // Check if connection is broken - if so, exit cleanly
+                let error_str = e.to_string();
+                if error_str.contains("Broken pipe") || error_str.contains("Connection reset") {
+                    info!("X11 connection lost, exiting cleanly");
+                    should_exit = true;
+                    continue;
+                }
                 warn!("Failed to flush X11 requests: {}", e);
             }
             
@@ -290,6 +304,13 @@ impl AreaApp {
                             Ok(Some(event)) => event_buffer.push(event),
                             Ok(None) => break,
                             Err(e) => {
+                                // Check if connection is broken
+                                let error_str = e.to_string();
+                                if error_str.contains("Broken pipe") || error_str.contains("Connection reset") {
+                                    error!("X11 connection lost, exiting cleanly");
+                                    should_exit = true;
+                                    break;
+                                }
                                 error!("Error polling for X11 events: {}", e);
                                 break;
                             }
@@ -339,7 +360,14 @@ impl AreaApp {
                 // Periodic scan for unmanaged windows
                 _ = scan_interval.tick() => {
                     if let Err(e) = self.scan_for_unmanaged_windows() {
-                        debug!("Error scanning for unmanaged windows: {}", e);
+                        // Check if connection is broken - if so, exit cleanly
+                        let error_str = e.to_string();
+                        if error_str.contains("Broken pipe") || error_str.contains("Connection reset") {
+                            info!("X11 connection lost during window scan, exiting cleanly");
+                            should_exit = true;
+                        } else {
+                            debug!("Error scanning for unmanaged windows: {}", e);
+                        }
                     }
                 }
             };
@@ -484,6 +512,19 @@ impl AreaApp {
                                     if let Err(err) = self.wm.set_fullscreen(&self.conn, client, true) {
                                         warn!("Failed to set fullscreen for window {} (ConfigureRequest detection): {}", cid, err);
                                     } else {
+                                        // If window has a frame, add client window to compositor (frame is unmapped)
+                                        if client.frame.is_some() {
+                                            // Add client window to compositor for fullscreen rendering
+                                            let client_geom = client.geometry;
+                                            let c_window = crate::compositor::c_window::CWindow::new(
+                                                cid,  // composite_id = client window
+                                                cid,  // client_id = client window
+                                                client_geom,
+                                                0,  // border_width = 0 for fullscreen
+                                                true,  // viewable = true (client is mapped)
+                                            );
+                                            self.compositor.add_window(c_window);
+                                        }
                                         // Coordinate with compositor: unredirect if config allows
                                         // Use client window directly for fullscreen (frame is hidden)
                                         if self.config.compositor.unredirect_fullscreen {
@@ -623,28 +664,49 @@ impl AreaApp {
                         
                         // Handle FULLSCREEN (mutually exclusive with MAXIMIZED)
                         if first_atom == net_wm_state_fullscreen || second_atom == net_wm_state_fullscreen {
+                            debug!("_NET_WM_STATE FULLSCREEN requested for window {} (action={}, current={})", 
+                                   client_id, action, 
+                                   self.wm_windows.get(&client_id).map(|c| c.state.fullscreen).unwrap_or(false));
                             if let Some(client) = self.wm_windows.get(&client_id) {
                                 let current = client.state.fullscreen;
                                 let should_change = should_apply(current, action);
                                 
                                 if should_change {
+                                    debug!("Setting fullscreen={} for window {}", !current, client_id);
                                     if let Some(client) = self.wm_windows.get_mut(&client_id) {
                                         if let Err(err) = self.wm.set_fullscreen(&self.conn, client, !current) {
                                             warn!("Failed to set fullscreen for window {}: {}", client_id, err);
                                         } else {
+                                            debug!("Successfully set fullscreen={} for window {}", !current, client_id);
                                             state_changed = true;
                                             // Coordinate with compositor: unredirect/redirect based on fullscreen state
                                             // Use client window directly for fullscreen (frame is hidden)
                                             if !current {
-                                                // Entering fullscreen - unredirect if config allows
+                                                // Entering fullscreen
+                                                // If window has a frame, add client window to compositor (frame is unmapped)
+                                                if client.frame.is_some() {
+                                                    // Add client window to compositor for fullscreen rendering
+                                                    let client_geom = client.geometry;
+                                                    let c_window = crate::compositor::c_window::CWindow::new(
+                                                        client_id,  // composite_id = client window
+                                                        client_id,  // client_id = client window
+                                                        client_geom,
+                                                        0,  // border_width = 0 for fullscreen
+                                                        true,  // viewable = true (client is mapped)
+                                                    );
+                                                    self.compositor.add_window(c_window);
+                                                }
+                                                // Unredirect if config allows
                                                 if self.config.compositor.unredirect_fullscreen {
                                                     self.compositor.unredirect_window(client_id);
                                                 }
                                             } else {
-                                                // Exiting fullscreen - redirect back
+                                                // Exiting fullscreen - redirect back and remove client window
                                                 if self.config.compositor.unredirect_fullscreen {
                                                     self.compositor.redirect_window(client_id);
                                                 }
+                                                // Remove client window from compositor (frame is mapped back, compositor will track frame again)
+                                                self.compositor.remove_window(client_id);
                                             }
                                         }
                                     }
@@ -669,7 +731,7 @@ impl AreaApp {
                                                 state_changed = true;
                                             }
                                         } else {
-                                            if let Err(err) = self.wm.maximize_window(&self.conn, client, self.shell.panel.height() as u32) {
+                                            if let Err(err) = self.wm.maximize_window(&self.conn, client) {
                                                 warn!("Failed to maximize window {}: {}", client_id, err);
                                             } else {
                                                 state_changed = true;
@@ -1021,7 +1083,7 @@ impl AreaApp {
                             if is_double_click {
                                 // Double-click detected - toggle maximize
                                 debug!("Double-click on titlebar for window {} - toggling maximize", client_id);
-                                if let Err(err) = self.wm.toggle_maximize(&self.conn, &mut self.wm_windows, client_id, self.shell.panel.height() as u32) {
+                                if let Err(err) = self.wm.toggle_maximize(&self.conn, &mut self.wm_windows, client_id) {
                                     warn!("Failed to toggle maximize window {}: {}", client_id, err);
                                 }
                                 // Reset double-click tracking
@@ -1057,7 +1119,7 @@ impl AreaApp {
                             }
                             wm::ButtonType::Maximize => {
                                 debug!("Maximize button clicked for window {}", window_id);
-                                if let Err(err) = self.wm.toggle_maximize(&self.conn, &mut self.wm_windows, window_id, self.shell.panel.height() as u32) {
+                                if let Err(err) = self.wm.toggle_maximize(&self.conn, &mut self.wm_windows, window_id) {
                                     warn!("Failed to toggle maximize window {}: {}", window_id, err);
                                 }
                             }
@@ -1168,6 +1230,19 @@ impl AreaApp {
                                 if let Err(err) = self.wm.set_fullscreen(&self.conn, client, true) {
                                     warn!("Failed to set fullscreen for window {} (geometry-based detection): {}", cid, err);
                                 } else {
+                                    // If window has a frame, add client window to compositor (frame is unmapped)
+                                    if client.frame.is_some() {
+                                        // Add client window to compositor for fullscreen rendering
+                                        let client_geom = client.geometry;
+                                        let c_window = crate::compositor::c_window::CWindow::new(
+                                            cid,  // composite_id = client window
+                                            cid,  // client_id = client window
+                                            client_geom,
+                                            0,  // border_width = 0 for fullscreen
+                                            true,  // viewable = true (client is mapped)
+                                        );
+                                        self.compositor.add_window(c_window);
+                                    }
                                     // Coordinate with compositor: unredirect if config allows
                                     // Use client window directly for fullscreen (frame is hidden)
                                     if self.config.compositor.unredirect_fullscreen {
@@ -1182,11 +1257,12 @@ impl AreaApp {
                             if let Err(err) = self.wm.set_fullscreen(&self.conn, client, false) {
                                 warn!("Failed to exit fullscreen for window {} (geometry-based detection): {}", cid, err);
                             } else {
-                                // Coordinate with compositor: redirect back
-                                // Use client window directly for fullscreen (frame is hidden)
+                                // Coordinate with compositor: redirect back and remove client window
                                 if self.config.compositor.unredirect_fullscreen {
                                     self.compositor.redirect_window(cid);
                                 }
+                                // Remove client window from compositor (frame is mapped back, compositor will track frame again)
+                                self.compositor.remove_window(cid);
                             }
                         }
                     }

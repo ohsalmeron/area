@@ -226,10 +226,8 @@ impl WindowManager {
         
         // Step 9: Set up _NET_SUPPORTING_WM_CHECK (for better interoperability)
         debug!("WM: Setting up _NET_SUPPORTING_WM_CHECK...");
-        let net_supporting_wm_check = conn.intern_atom(false, b"_NET_SUPPORTING_WM_CHECK")?
-            .reply()
-            .context("Failed to intern _NET_SUPPORTING_WM_CHECK")?
-            .atom;
+        // Use the atom from Atoms struct (now available there)
+        let net_supporting_wm_check = atoms._net_supporting_wm_check;
         
         // Set _NET_SUPPORTING_WM_CHECK on root to point to our owner window
         conn.change_property32(
@@ -365,15 +363,8 @@ impl WindowManager {
             )?;
         }
         
-        // Account for panel height (40px) - windows should start below the panel
-        const PANEL_HEIGHT: i32 = 40;
-        let window_y = geom.y as i32;
-        // If window is at the top (y < panel height), position it below the panel
-        let adjusted_y = if window_y < PANEL_HEIGHT {
-            PANEL_HEIGHT
-        } else {
-            window_y
-        };
+        // Use window's actual y position (no panel offset)
+        let adjusted_y = geom.y as i32;
         
         client.geometry = Geometry {
             x: geom.x as i32,
@@ -397,12 +388,8 @@ impl WindowManager {
         }
         
         // Create window frame with decorations
-        // Account for panel height (40px) - frames should start below the panel
-        let frame_y = if client.geometry.y < PANEL_HEIGHT {
-            PANEL_HEIGHT as i16
-        } else {
-            client.geometry.y as i16
-        };
+        // Use window's actual y position (no panel offset)
+        let frame_y = client.geometry.y as i16;
         
         let screen = &conn.setup().roots[self.screen_num];
         
@@ -456,13 +443,7 @@ impl WindowManager {
             // If not decorated, set _NET_FRAME_EXTENTS to 0
             let _ = self.atoms.update_frame_extents(conn, client.id, 0, 0, 0, 0);
             
-            // Reposition window below panel if needed (even if not decorated)
-            if client.geometry.y < PANEL_HEIGHT {
-                conn.configure_window(
-                    client.id,
-                    &ConfigureWindowAux::new().y(PANEL_HEIGHT),
-                )?;
-            }
+            // No panel offset needed - use window's actual position
         }
         
         client.mapped = true;
@@ -529,7 +510,6 @@ impl WindowManager {
         conn: &RustConnection,
         windows: &mut HashMap<u32, Client>,
         window_id: u32,
-        top_offset: u32,
     ) -> Result<()> {
         let client = windows.get_mut(&window_id)
             .context("Window not found")?;
@@ -537,7 +517,7 @@ impl WindowManager {
         if client.state.maximized {
             self.restore_window(conn, client)?;
         } else {
-            self.maximize_window(conn, client, top_offset)?;
+            self.maximize_window(conn, client)?;
         }
         
         Ok(())
@@ -548,7 +528,6 @@ impl WindowManager {
         &mut self,
         conn: &RustConnection,
         client: &mut Client,
-        top_offset: u32,
     ) -> Result<()> {
         info!("Maximizing window {}", client.id);
         
@@ -566,14 +545,14 @@ impl WindowManager {
         const TITLEBAR_HEIGHT: u32 = 32;
         const BORDER_WIDTH: u32 = 2;
         
-        // Final frame outer geometry: (0, top_offset, max_width, max_height - top_offset)
+        // Final frame outer geometry: (0, 0, max_width, max_height)
         // Internal size of the frame:
         let frame_width = max_width - (BORDER_WIDTH * 2);
-        let frame_height = max_height - top_offset - (BORDER_WIDTH * 2);
+        let frame_height = max_height - (BORDER_WIDTH * 2);
         
         // Update window geometry (client relative to root)
         client.geometry.x = BORDER_WIDTH as i32;
-        client.geometry.y = (top_offset + BORDER_WIDTH + TITLEBAR_HEIGHT) as i32;
+        client.geometry.y = (BORDER_WIDTH + TITLEBAR_HEIGHT) as i32;
         client.geometry.width = frame_width;
         client.geometry.height = frame_height - TITLEBAR_HEIGHT;
         client.state.maximized = true;
@@ -583,12 +562,11 @@ impl WindowManager {
             let frame = decorations::WindowFrame::from_state(client.id, frame_state);
             
             // Move frame so its border is flush with screen edge
-            // Outer X = x - BORDER_WIDTH = 0 => x = BORDER_WIDTH
-            // Outer Y = y - BORDER_WIDTH = top_offset => y = top_offset + BORDER_WIDTH
-            frame.move_to(conn, BORDER_WIDTH as i16, (top_offset + BORDER_WIDTH) as i16)?;
+            // Frame position: (BORDER_WIDTH, BORDER_WIDTH) to account for borders
+            frame.move_to(conn, BORDER_WIDTH as i16, BORDER_WIDTH as i16)?;
             // Get decorations config from default for now
             // TODO: Store decorations config in WindowManager
-            frame.resize(conn, frame_width as u16, (frame_height - TITLEBAR_HEIGHT) as u16, &crate::config::WindowDecorationConfig {
+            frame.resize(conn, frame_width as u16, frame_height as u16, &crate::config::WindowDecorationConfig {
                 titlebar_height: 32,
                 border_width: 2,
                 button_size: 20,
@@ -600,14 +578,14 @@ impl WindowManager {
                 client.id,
                 &ConfigureWindowAux::new()
                     .x(0)
-                    .y(top_offset as i32)
+                    .y(0)
                     .width(max_width)
-                    .height(max_height - top_offset),
+                    .height(max_height),
             )?;
             client.geometry.x = 0;
-            client.geometry.y = top_offset as i32;
+            client.geometry.y = 0;
             client.geometry.width = max_width;
-            client.geometry.height = max_height - top_offset;
+            client.geometry.height = max_height;
         }
         
         // Update EWMH state
@@ -652,24 +630,13 @@ impl WindowManager {
             client.geometry.height = screen_height;
             
             // Configure windows for fullscreen
-            // If window has a frame, configure both frame and client
-            // Frame is positioned at 0,0 with screen dimensions
-            // Client is positioned at 0,0 relative to frame (which makes it at screen 0,0)
+            // If window has a frame, unmap it and configure client directly
+            // This ensures decorations are not visible during fullscreen
             if let Some(frame_state) = &client.frame {
                 let frame = decorations::WindowFrame::from_state(client.id, frame_state);
-                // Move frame to 0,0 with screen dimensions
-                frame.move_to(conn, 0, 0)?;
-                // Resize frame to screen size
-                // Get decorations config - for now use default values
-                // TODO: Store decorations config in WindowManager or pass it in
-                const TITLEBAR_HEIGHT: u16 = 32;
-                frame.resize(conn, screen_width as u16, screen_height as u16, &crate::config::WindowDecorationConfig {
-                    titlebar_height: TITLEBAR_HEIGHT,
-                    border_width: 2,
-                    button_size: 20,
-                    button_padding: 5,
-                })?;
-                // Client is at 0,0 relative to frame (screen 0,0)
+                // Unmap the frame window to hide decorations
+                conn.unmap_window(frame.frame)?;
+                // Configure client directly at screen 0,0 with screen dimensions
                 conn.configure_window(
                     client.id,
                     &ConfigureWindowAux::new()
@@ -695,11 +662,12 @@ impl WindowManager {
             // Set NET_FRAME_EXTENTS to 0,0,0,0 (no decorations visible)
             self.atoms.update_frame_extents(conn, client.id, 0, 0, 0, 0)?;
             
-            // Update EWMH state - add FULLSCREEN
+            // Update EWMH state - add FULLSCREEN and ABOVE (always on top)
+            // FULLSCREEN windows should always be on top, so set ABOVE state
             self.atoms.set_window_state(
                 conn,
                 client.id,
-                &[self.atoms._net_wm_state_fullscreen],
+                &[self.atoms._net_wm_state_fullscreen, self.atoms._net_wm_state_above],
                 &[],
             )?;
         } else {
@@ -711,14 +679,15 @@ impl WindowManager {
                 
                 // Restore client window geometry
                 if let Some(frame_state) = &client.frame {
-                    // Window has frame - restore frame position and client position relative to frame
+                    // Window has frame - map it back and restore frame position and client position relative to frame
                     let frame = decorations::WindowFrame::from_state(client.id, frame_state);
                     const TITLEBAR_HEIGHT: i32 = 32;
                     const BORDER_WIDTH: i32 = 2;
                     
-                    // Frame should be at (x - border, y - titlebar - border)
-                    let frame_x = restore.x - BORDER_WIDTH;
-                    let frame_y = restore.y - TITLEBAR_HEIGHT - BORDER_WIDTH;
+            // Frame should be at (x - border, y - titlebar - border)
+            // No panel offset - use actual restore position
+            let frame_x = restore.x - BORDER_WIDTH;
+            let frame_y = restore.y - TITLEBAR_HEIGHT - BORDER_WIDTH;
                     let frame_width = restore.width + (BORDER_WIDTH * 2) as u32;
                     let frame_height = restore.height + (TITLEBAR_HEIGHT + BORDER_WIDTH * 2) as u32;
                     
@@ -731,6 +700,9 @@ impl WindowManager {
                         button_size: 20,
                         button_padding: 5,
                     })?;
+                    
+                    // Map the frame window back
+                    conn.map_window(frame.frame)?;
                     
                     // Client is positioned relative to frame
                     conn.configure_window(
@@ -765,12 +737,12 @@ impl WindowManager {
                 self.atoms.update_frame_extents(conn, client.id, 0, 0, 0, 0)?;
             }
             
-            // Remove EWMH fullscreen state
+            // Remove EWMH fullscreen and ABOVE state
             self.atoms.set_window_state(
                 conn,
                 client.id,
                 &[],
-                &[self.atoms._net_wm_state_fullscreen],
+                &[self.atoms._net_wm_state_fullscreen, self.atoms._net_wm_state_above],
             )?;
         }
         

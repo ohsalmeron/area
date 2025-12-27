@@ -489,9 +489,20 @@ impl CompositorInner {
         let shell = &self.shell;
 
         // Check EWMH fullscreen state BEFORE mutable borrow of gl_context/renderer
-        let fullscreen_windows: std::collections::HashSet<u32> = self.windows.keys()
-            .filter(|&&id| self.check_ewmh_fullscreen(id))
-            .copied()
+        // For windows with frames, check the client window ID (EWMH state is on client, not frame)
+        let fullscreen_windows: std::collections::HashSet<u32> = self.windows.values()
+            .filter(|w| {
+                // Check the client window ID for fullscreen state (EWMH state is on client, not frame)
+                let check_id = if w.id != w.client_id {
+                    // This is a frame window - check the client window for fullscreen state
+                    w.client_id
+                } else {
+                    // This is a client window - check itself
+                    w.id
+                };
+                self.check_ewmh_fullscreen(check_id)
+            })
+            .map(|w| w.id)  // Map to the tracked window ID (frame or client)
             .collect();
 
         if let (Some(gl_context), Some(renderer)) = (&mut self.gl_context, &mut self.renderer) {
@@ -505,7 +516,7 @@ impl CompositorInner {
                 gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
             }
             
-            let panel_height = shell.panel.height();
+            // Panel removed - no height adjustment needed
             
             // First pass: lazy pixmap binding
             // Skip unmapped/unviewable windows (performance optimization)
@@ -635,54 +646,96 @@ impl CompositorInner {
             }
             
             // Second pass: render windows
-            // Skip unmapped/unviewable windows (performance optimization)
-            let mut windows_to_render: Vec<_> = self.windows.values()
-                .filter(|w| w.viewable)
-                .collect();
-            windows_to_render.sort_by_key(|w| w.id);
+            // Separate normal windows from fullscreen windows
+            // Fullscreen windows should render LAST (on top of everything)
+            // Collect window IDs and render info first to avoid borrow checker issues
+            let mut normal_windows = Vec::new();
+            let mut fullscreen_windows_to_render = Vec::new();
             
-            for window in windows_to_render {
+            // First, collect all window info without mutable borrows
+            let window_info: Vec<(u32, u32, bool, bool, bool, bool)> = self.windows.values()
+                .map(|w| {
+                    // Check fullscreen state: if this is a frame window, check the client window's state
+                    let check_fullscreen_id = if w.id != w.client_id {
+                        w.client_id  // Frame window - check client window for fullscreen state
+                    } else {
+                        w.id  // Client window - check itself
+                    };
+                    let is_fullscreen_geometry = w.is_fullscreen(screen_width as u16, screen_height as u16);
+                    let is_fullscreen_ewmh = fullscreen_windows.contains(&check_fullscreen_id);
+                    let is_fullscreen = is_fullscreen_geometry || is_fullscreen_ewmh;
+                    (w.id, w.client_id, w.unredirected, w.viewable, is_fullscreen, w.id != w.client_id)
+                })
+                .collect();
+            
+            for (window_id, client_id, unredirected, viewable, is_fullscreen, has_frame) in window_info {
                 // Skip unredirected windows (they render directly, bypassing compositor)
-                if window.unredirected {
+                if unredirected {
                     continue;
                 }
                 
-                // Check if window is fullscreen (geometry-based OR EWMH state)
-                // EWMH state check is important because windows can request fullscreen before resizing
-                let is_fullscreen_geometry = window.is_fullscreen(screen_width as u16, screen_height as u16);
-                let is_fullscreen_ewmh = fullscreen_windows.contains(&window.id);
-                let is_fullscreen = is_fullscreen_geometry || is_fullscreen_ewmh;
-                
-                if renderer.has_texture(window.id) {
-                    if is_fullscreen {
-                        // Fullscreen windows: render covering entire screen (0,0 to screen_width, screen_height)
-                        // This ensures the game covers everything, then panel/cursor overlay on top
-                        renderer.render_window(
-                            gl_context,
-                            window.id,
-                            0.0,  // x = 0
-                            0.0,  // y = 0 (covers panel area too)
-                            screen_width,  // width = full screen
-                            screen_height, // height = full screen
-                            screen_width,
-                            screen_height,
-                            window.opacity,
-                            window.damaged,
-                        );
-                    } else {
-                        // Normal windows: render at their position, adjusted for panel
-                        let window_y = window.geometry.y as f32;
-                        let adjusted_y = if window_y < panel_height {
-                            panel_height
+                // CRITICAL FIX: Skip frame windows if their CLIENT window is fullscreen
+                // Frame windows are never fullscreen themselves - only their client window can be fullscreen
+                if has_frame {
+                    // This is a frame window - check if the CLIENT window is fullscreen
+                    let client_is_fullscreen = {
+                        // Check client window's geometry
+                        let client_geom_fullscreen = if let Some(client_w) = self.windows.get(&client_id) {
+                            client_w.is_fullscreen(screen_width as u16, screen_height as u16)
                         } else {
-                            window_y
+                            false
                         };
-                        
+                        // Check client window's EWMH state
+                        let client_ewmh_fullscreen = fullscreen_windows.contains(&client_id);
+                        client_geom_fullscreen || client_ewmh_fullscreen
+                    };
+                    
+                    if client_is_fullscreen {
+                        // Frame window should be skipped entirely - client window is fullscreen and will be rendered separately
+                        continue;
+                    }
+                    // Client is not fullscreen, so render frame normally (if viewable)
+                    if !viewable {
+                        continue; // Skip unmapped frames
+                    }
+                    normal_windows.push((window_id, window_id));
+                    continue;
+                }
+                
+                // This is a client window (or window without frame)
+                // Only include viewable windows (or fullscreen windows even if frame is unmapped)
+                if !viewable && !is_fullscreen {
+                    continue;
+                }
+                
+                // For fullscreen windows, render them in the fullscreen layer (on top)
+                let (is_fullscreen_window, render_id) = if is_fullscreen {
+                    (true, window_id)
+                } else {
+                    (false, window_id)
+                };
+                
+                if is_fullscreen_window {
+                    fullscreen_windows_to_render.push((window_id, render_id));
+                } else {
+                    normal_windows.push((window_id, render_id));
+                }
+            }
+            
+            // Render normal windows first
+            normal_windows.sort_by_key(|(wid, _)| *wid);
+            for (window_id, render_id) in normal_windows {
+                // Get window from HashMap now (after collecting info)
+                if let Some(window) = self.windows.get(&window_id) {
+                    let has_texture = renderer.has_texture(render_id);
+                    
+                    if has_texture {
+                        // Normal windows: render at their position
                         renderer.render_window(
                             gl_context,
-                            window.id,
+                            render_id,
                             window.geometry.x as f32,
-                            adjusted_y,
+                            window.geometry.y as f32,
                             window.geometry.width as f32,
                             window.geometry.height as f32,
                             screen_width,
@@ -690,26 +743,19 @@ impl CompositorInner {
                             window.opacity,
                             window.damaged,
                         );
-                    }
-                } else {
-                    // Fallback rendering
-                    let window_y = window.geometry.y as f32;
-                    let adjusted_y = if window_y < panel_height {
-                        panel_height
                     } else {
-                        window_y
-                    };
-                    
-                    renderer.render_window_fallback(
-                        gl_context,
-                        window.id,
-                        window.geometry.x as f32,
-                        adjusted_y,
-                        window.geometry.width as f32,
-                        window.geometry.height as f32,
-                        screen_width,
-                        screen_height,
-                    );
+                        // Fallback rendering
+                        renderer.render_window_fallback(
+                            gl_context,
+                            render_id,
+                            window.geometry.x as f32,
+                            window.geometry.y as f32,
+                            window.geometry.width as f32,
+                            window.geometry.height as f32,
+                            screen_width,
+                            screen_height,
+                        );
+                    }
                 }
             }
             
@@ -723,8 +769,45 @@ impl CompositorInner {
                 }
             }
             
-            shell.panel.render(renderer, screen_width, screen_height);
+            // Render logout dialog (if needed)
             shell.logout_dialog.render(renderer, screen_width, screen_height);
+            
+            // Render fullscreen windows LAST (on top of everything)
+            fullscreen_windows_to_render.sort_by_key(|(wid, _)| *wid);
+            for (window_id, render_id) in fullscreen_windows_to_render {
+                // Get window from HashMap now (after collecting info)
+                if let Some(window) = self.windows.get(&window_id) {
+                    let has_texture = renderer.has_texture(render_id);
+                    
+                    if has_texture {
+                        // Fullscreen windows: render covering entire screen (0,0 to screen_width, screen_height)
+                        renderer.render_window(
+                            gl_context,
+                            render_id,  // Use client window if fullscreen with frame
+                            0.0,  // x = 0
+                            0.0,  // y = 0
+                            screen_width,  // width = full screen
+                            screen_height, // height = full screen
+                            screen_width,
+                            screen_height,
+                            window.opacity,
+                            window.damaged,
+                        );
+                    } else {
+                        // Fallback rendering for fullscreen
+                        renderer.render_window_fallback(
+                            gl_context,
+                            render_id,
+                            0.0,
+                            0.0,
+                            screen_width,
+                            screen_height,
+                            screen_width,
+                            screen_height,
+                        );
+                    }
+                }
+            }
             
             if let Some(ref mut cursor) = self.cursor_manager {
                 if cursor.visible && cursor.width > 0 && cursor.height > 0 && !cursor.pixels.is_empty() {
