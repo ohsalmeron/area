@@ -181,10 +181,13 @@ impl GlContext {
              return Err(anyhow::anyhow!("No suitable GLX FBConfig found"));
         }
 
-        // Find FBConfig with matching visual ID (prioritize visual match over TFP - like xfwm4 does)
+        // Follow xfwm4's approach: REQUIRE TFP support, use glXCreateWindow for visual mismatches
         let mut config: Option<glx::GLXFBConfig> = None;
         let mut matched_config_tfp = false;
+        let mut visual_match_tfp: Option<glx::GLXFBConfig> = None; // Visual match WITH TFP (perfect)
+        let mut visual_match_no_tfp: Option<glx::GLXFBConfig> = None; // Visual match WITHOUT TFP (last resort)
         
+        // First pass: Find visual match with TFP (perfect match - can use overlay directly)
         if overlay_visual_id != 0 {
             for i in 0..num_configs as usize {
                 let test_config = unsafe { *configs_ptr.add(i) };
@@ -197,33 +200,62 @@ impl GlContext {
                     unsafe { (xlib.XFree)(vinfo as *mut _); }
                     
                     if config_visual_id == overlay_visual_id {
-                        // Found matching visual - check TFP support but use it anyway
-                        let mut bind_to_texture = 0;
+                        // Check pixmap support (required for TFP)
+                        let mut drawable_type = 0;
                         unsafe {
-                            (glx.glXGetFBConfigAttrib)(display, test_config, GLX_BIND_TO_TEXTURE_RGBA_EXT, &mut bind_to_texture);
+                            (glx.glXGetFBConfigAttrib)(display, test_config, glx::GLX_DRAWABLE_TYPE as i32, &mut drawable_type);
                         }
-                        config = Some(test_config);
-                        matched_config_tfp = bind_to_texture != 0;
-                        if matched_config_tfp {
-                            info!("Found FBConfig matching overlay visual ID 0x{:x} with TFP support", overlay_visual_id);
-                        } else {
-                            warn!("Found FBConfig matching overlay visual ID 0x{:x} but without TFP support (TFP may not work)", overlay_visual_id);
+                        if (drawable_type & glx::GLX_PIXMAP_BIT as i32) == 0 {
+                            continue;
                         }
+                        
+                        // Check TFP target support (like xfwm4)
+                        let mut bind_targets = 0;
+                        unsafe {
+                            (glx.glXGetFBConfigAttrib)(display, test_config, GLX_BIND_TO_TEXTURE_TARGETS_EXT, &mut bind_targets);
+                        }
+                        if bind_targets == 0 || (bind_targets & GLX_TEXTURE_2D_BIT_EXT) == 0 {
+                            if visual_match_no_tfp.is_none() {
+                                visual_match_no_tfp = Some(test_config);
+                            }
+                            continue;
+                        }
+                        
+                        // Check RGBA or RGB binding (like xfwm4)
+                        let mut bind_rgba = 0;
+                        unsafe {
+                            (glx.glXGetFBConfigAttrib)(display, test_config, GLX_BIND_TO_TEXTURE_RGBA_EXT, &mut bind_rgba);
+                        }
+                        if bind_rgba == 0 {
+                            let mut bind_rgb = 0;
+                            unsafe {
+                                (glx.glXGetFBConfigAttrib)(display, test_config, GLX_BIND_TO_TEXTURE_RGB_EXT, &mut bind_rgb);
+                            }
+                            if bind_rgb == 0 {
+                                if visual_match_no_tfp.is_none() {
+                                    visual_match_no_tfp = Some(test_config);
+                                }
+                                continue;
+                            }
+                        }
+                        
+                        // Perfect match: visual AND TFP support
+                        visual_match_tfp = Some(test_config);
+                        matched_config_tfp = true;
+                        info!("Found FBConfig matching overlay visual ID 0x{:x} with TFP support (perfect match)", overlay_visual_id);
                         break;
                     }
                 }
             }
         }
         
-        // Fallback: try TFP-capable configs if no visual match
-        if config.is_none() {
+        // Second pass: Find any TFP-capable config (for use with glXCreateWindow)
+        let mut tfp_config: Option<glx::GLXFBConfig> = None;
+        {
             let tfp_attribs = [
                 glx::GLX_DRAWABLE_TYPE as i32, glx::GLX_WINDOW_BIT as i32 | glx::GLX_PIXMAP_BIT as i32,
                 glx::GLX_RENDER_TYPE as i32, glx::GLX_RGBA_BIT as i32,
                 glx::GLX_DOUBLEBUFFER as i32, 1,
-                glx::GLX_RED_SIZE as i32, 8,
-                glx::GLX_GREEN_SIZE as i32, 8,
-                glx::GLX_BLUE_SIZE as i32, 8,
                 GLX_BIND_TO_TEXTURE_RGBA_EXT, 1, 
                 GLX_BIND_TO_TEXTURE_TARGETS_EXT, GLX_TEXTURE_2D_BIT_EXT,
                 0
@@ -235,13 +267,35 @@ impl GlContext {
             };
             
             if !tfp_configs_ptr.is_null() && num_tfp_configs > 0 {
-                config = Some(unsafe { *tfp_configs_ptr });
-                warn!("No FBConfig matching overlay visual ID 0x{:x}, using TFP-capable config (visual mismatch - glXCreateWindow may fail)", overlay_visual_id);
+                tfp_config = Some(unsafe { *tfp_configs_ptr });
+                debug!("Found {} TFP-capable FBConfig(s)", num_tfp_configs);
                 unsafe { (xlib.XFree)(tfp_configs_ptr as *mut _); }
-            } else {
-                config = Some(unsafe { *configs_ptr });
-                warn!("No TFP-capable FBConfig found, using first available (TFP may not work)");
             }
+        }
+        
+        // Selection priority (like xfwm4):
+        // 1. Visual match WITH TFP (perfect - can use overlay directly)
+        // 2. TFP-capable config (use glXCreateWindow - handles visual mismatch)
+        // 3. Visual match WITHOUT TFP (last resort - compositing won't work)
+        if let Some(perfect) = visual_match_tfp {
+            config = Some(perfect);
+            matched_config_tfp = true;
+            info!("Using perfect match: visual 0x{:x} with TFP support", overlay_visual_id);
+        } else if let Some(tfp_cfg) = tfp_config {
+            // Use TFP config with glXCreateWindow (like xfwm4 does)
+            config = Some(tfp_cfg);
+            matched_config_tfp = true;
+            warn!("No visual match with TFP found. Using TFP-capable config with glXCreateWindow (visual mismatch handled by GLX)");
+        } else if let Some(visual_fallback) = visual_match_no_tfp {
+            config = Some(visual_fallback);
+            matched_config_tfp = false;
+            warn!("No TFP-capable FBConfig found. Using visual match without TFP - compositing will not work!");
+        }
+        
+        // Final fallback
+        if config.is_none() {
+            config = Some(unsafe { *configs_ptr });
+            warn!("No suitable FBConfig found, using first available (TFP may not work)");
         }
         
         // Warn if TFP is required but not available

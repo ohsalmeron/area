@@ -5,6 +5,28 @@
 pub mod decorations;
 pub mod ewmh;
 pub mod client;
+pub mod client_flags;
+pub mod display;
+pub mod screen;
+pub mod events;
+pub mod focus;
+pub mod stacking;
+pub mod workspace;
+pub mod netwm;
+pub mod moveresize;
+pub mod placement;
+pub mod keyboard;
+pub mod settings;
+pub mod transients;
+pub mod hints;
+pub mod menu;
+pub mod icons;
+pub mod cycle;
+pub mod session;
+pub mod startup;
+pub mod terminate;
+pub mod device;
+pub mod event_filter;
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -282,33 +304,100 @@ impl WindowManager {
         })
     }
     
+    /// Check if window should be decorated based on class/name patterns
+    /// Returns false if window matches a pattern that indicates no decorations
+    fn should_decorate_from_patterns<C: Connection>(
+        conn: &C,
+        window: Window,
+        title: &str,
+    ) -> Result<bool> {
+        // Get WM_CLASS property (contains both res_class and res_name)
+        let mut res_class = String::new();
+        let mut res_name = String::new();
+        
+        if let Ok(reply) = conn.get_property(
+            false,
+            window,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
+            0,
+            1024,
+        )?.reply() {
+            if let Ok(class_string) = String::from_utf8(reply.value) {
+                // WM_CLASS format: "res_name\0res_class\0"
+                let parts: Vec<&str> = class_string.split('\0').collect();
+                if parts.len() >= 2 {
+                    res_name = parts[0].to_lowercase();
+                    res_class = parts[1].to_lowercase();
+                } else if parts.len() == 1 {
+                    res_class = parts[0].to_lowercase();
+                }
+            }
+        }
+        
+        let title_lower = title.to_lowercase();
+        
+        // Check for Chrome/Chromium
+        if res_class.contains("google-chrome") || res_class.contains("chromium") ||
+           res_name.contains("chrome") || res_name.contains("chromium") {
+            return Ok(false);
+        }
+        
+        // Check for Firefox
+        if res_class.contains("firefox") || res_class.contains("navigator") ||
+           res_name.contains("firefox") || res_name.contains("navigator") {
+            return Ok(false);
+        }
+        
+        // Check for Electron apps
+        if res_class.contains("electron") || res_name.contains("electron") ||
+           title_lower.contains("electron") {
+            return Ok(false);
+        }
+        
+        // Check for Wine apps
+        if res_class.contains("wine") || res_name.contains("wine") ||
+           title_lower.contains(".exe") {
+            return Ok(false);
+        }
+        
+        // Check for common game patterns (Steam games often have specific patterns)
+        // Many games set their own decorations or use fullscreen exclusively
+        if title_lower.contains("steam") && (title_lower.contains("game") || title_lower.contains("launch")) {
+            return Ok(false);
+        }
+        
+        // Default: allow decorations
+        Ok(true)
+    }
+    
     /// Manage a new window (called when MapRequest is received)
     pub fn manage_window(
         &mut self,
         conn: &x11rb::rust_connection::RustConnection,
         client: &mut Client,
     ) -> Result<()> {
-        debug!("WM: Managing window {}", client.id);
+        debug!("WM: Managing window {}", client.window);
         
         // Get window attributes
-        let attrs = match conn.get_window_attributes(client.id)?.reply() {
+        let attrs = match conn.get_window_attributes(client.window)?.reply() {
             Ok(attrs) => attrs,
             Err(e) => {
-                debug!("WM: Failed to get attributes for window {}, it probably disappeared: {}", client.id, e);
+                debug!("WM: Failed to get attributes for window {}, it probably disappeared: {}", client.window, e);
                 return Ok(());
             }
         };
         
         if attrs.override_redirect {
-            debug!("Window {} is override-redirect, skipping", client.id);
+            debug!("Window {} is override-redirect, skipping", client.window);
             return Ok(());
         }
         
         // Get window geometry
-        let geom = match conn.get_geometry(client.id)?.reply() {
+        let geom = match conn.get_geometry(client.window)?.reply() {
             Ok(geom) => geom,
             Err(e) => {
-                debug!("WM: Failed to get geometry for window {}, it probably disappeared: {}", client.id, e);
+                debug!("WM: Failed to get geometry for window {}, it probably disappeared: {}", client.window, e);
                 return Ok(());
             }
         };
@@ -321,7 +410,7 @@ impl WindowManager {
         if width == 1 && height == 1 {
             if let Ok(reply) = conn.get_property(
                 false,
-                client.id,
+                client.window,
                 AtomEnum::WM_NORMAL_HINTS,
                 AtomEnum::WM_SIZE_HINTS,
                 0,
@@ -356,19 +445,56 @@ impl WindowManager {
             
             // Set window to proper size
             conn.configure_window(
-                client.id,
+                client.window,
                 &ConfigureWindowAux::new()
                     .width(width)
                     .height(height),
             )?;
         }
         
-        // Use window's actual y position (no panel offset)
-        let adjusted_y = geom.y as i32;
+        // Center window on screen by default (unless window has a specific position hint)
+        let screen = &conn.setup().roots[self.screen_num];
+        let screen_width = screen.width_in_pixels as i32;
+        let screen_height = screen.height_in_pixels as i32;
+        
+        // Check if window has a position hint (USPosition flag in WM_NORMAL_HINTS)
+        let has_position_hint = if let Ok(reply) = conn.get_property(
+            false,
+            client.window,
+            AtomEnum::WM_NORMAL_HINTS,
+            AtomEnum::WM_SIZE_HINTS,
+            0,
+            18,
+        )?.reply() {
+            if let Some(value32) = reply.value32() {
+                let hints: Vec<u32> = value32.take(18).collect();
+                if hints.len() >= 1 {
+                    // Check USPosition flag (bit 0)
+                    (hints[0] & 0x00000001) != 0
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        
+        // Center window if it doesn't have a position hint or is at (0,0) or invalid position
+        let (x, y) = if has_position_hint && geom.x != 0 && geom.y != 0 {
+            // Window has explicit position hint, use it
+            (geom.x as i32, geom.y as i32)
+        } else {
+            // Center window on screen
+            let center_x = (screen_width - width as i32) / 2;
+            let center_y = (screen_height - height as i32) / 2;
+            (center_x, center_y)
+        };
         
         client.geometry = Geometry {
-            x: geom.x as i32,
-            y: adjusted_y,
+            x,
+            y,
             width,
             height,
         };
@@ -376,37 +502,54 @@ impl WindowManager {
         // Get window title
         if let Ok(reply) = conn.get_property(
             false,
-            client.id,
+            client.window,
             AtomEnum::WM_NAME,
             AtomEnum::STRING,
             0,
             1024,
         )?.reply() {
             if let Ok(title) = String::from_utf8(reply.value) {
-                client.title = title;
+                client.name = title;
             }
         }
         
         // Create window frame with decorations
-        // Use window's actual y position (no panel offset)
+        // Use window's centered position
         let frame_y = client.geometry.y as i16;
         
         let screen = &conn.setup().roots[self.screen_num];
         
-        // Check if window should be decorated based on _NET_WM_WINDOW_TYPE
-        let window_types = self.atoms.get_window_type(conn, client.id).unwrap_or_default();
+        // Check if window should be decorated
+        // Priority: 1. MOTIF_WM_HINTS, 2. _NET_WM_WINDOW_TYPE, 3. Window class/name patterns
         let mut should_decorate = true;
         
-        for &win_type in &window_types {
-            if win_type == self.atoms._net_wm_window_type_dock ||
-               win_type == self.atoms._net_wm_window_type_tooltip ||
-               win_type == self.atoms._net_wm_window_type_notification ||
-               win_type == self.atoms._net_wm_window_type_splash ||
-               win_type == self.atoms._net_wm_window_type_menu ||
-               win_type == self.atoms._net_wm_window_type_dropdown_menu ||
-               win_type == self.atoms._net_wm_window_type_popup_menu {
-                should_decorate = false;
-                break;
+        // First, check MOTIF_WM_HINTS (most authoritative for decoration requests)
+        if let Ok(Some(motif_should_decorate)) = self.atoms.should_decorate_from_motif_hints(conn, client.window) {
+            should_decorate = motif_should_decorate;
+            debug!("MOTIF hints for window {}: should_decorate={}", client.window, should_decorate);
+        } else {
+            // MOTIF hints not present or don't specify - check _NET_WM_WINDOW_TYPE
+            let window_types = self.atoms.get_window_type(conn, client.window).unwrap_or_default();
+            
+            for &win_type in &window_types {
+                if win_type == self.atoms._net_wm_window_type_dock ||
+                   win_type == self.atoms._net_wm_window_type_tooltip ||
+                   win_type == self.atoms._net_wm_window_type_notification ||
+                   win_type == self.atoms._net_wm_window_type_splash ||
+                   win_type == self.atoms._net_wm_window_type_menu ||
+                   win_type == self.atoms._net_wm_window_type_dropdown_menu ||
+                   win_type == self.atoms._net_wm_window_type_popup_menu {
+                    should_decorate = false;
+                    break;
+                }
+            }
+            
+            // If still should_decorate, check window class/name patterns
+            if should_decorate {
+                should_decorate = Self::should_decorate_from_patterns(conn, client.window, &client.name.as_str())?;
+                if !should_decorate {
+                    debug!("Window {} matched no-decoration pattern (class/name)", client.window);
+                }
             }
         }
         
@@ -418,7 +561,7 @@ impl WindowManager {
             let dec_frame = decorations::WindowFrame::new(
                 conn,
                 screen,
-                client.id,
+                client.window,
                 client.geometry.x as i16,
                 frame_y,
                 client.geometry.width as u16,
@@ -438,24 +581,24 @@ impl WindowManager {
             
             // Update _NET_FRAME_EXTENTS only if decorated
             // Top: 32 (Titlebar), Left/Right/Bottom: 2 (Border)
-            let _ = self.atoms.update_frame_extents(conn, client.id, 2, 2, 32, 2);
+            let _ = self.atoms.update_frame_extents(conn, client.window, 2, 2, 32, 2);
         } else {
             // If not decorated, set _NET_FRAME_EXTENTS to 0
-            let _ = self.atoms.update_frame_extents(conn, client.id, 0, 0, 0, 0);
+            let _ = self.atoms.update_frame_extents(conn, client.window, 0, 0, 0, 0);
             
             // No panel offset needed - use window's actual position
         }
         
-        client.mapped = true;
+        client.set_mapped(true);
         
         conn.flush()?;
         
-        debug!("WM: Managed window {} ({})", client.id, client.title);
+        debug!("WM: Managed window {} ({})", client.window, client.name.as_str());
         
         // Update _NET_FRAME_EXTENTS so client knows about our decorations
         // Currently hardcoded based on our hardcoded decoration sizes
         // Top: 32 (Titlebar), Left/Right/Bottom: 2 (Border)
-        let _ = self.atoms.update_frame_extents(conn, client.id, 2, 2, 32, 2);
+        let _ = self.atoms.update_frame_extents(conn, client.window, 2, 2, 32, 2);
         
         Ok(())
     }
@@ -466,26 +609,26 @@ impl WindowManager {
         conn: &x11rb::rust_connection::RustConnection,
         client: &mut Client,
     ) -> Result<()> {
-        debug!("WM: Unmanaging window {}", client.id);
+        debug!("WM: Unmanaging window {}", client.window);
         
         // Clear drag/resize state if this window was being dragged/resized
         if let Some(ref drag) = self.drag_state {
-            if drag.window_id == client.id {
+            if drag.window_id == client.window {
                 self.drag_state = None;
             }
         }
         
         // Destroy window frame if it exists
         if let Some(frame_state) = &client.frame {
-            let frame = decorations::WindowFrame::from_state(client.id, frame_state);
+            let frame = decorations::WindowFrame::from_state(client.window, frame_state);
             let screen = &conn.setup().roots[self.screen_num];
             if let Err(err) = frame.destroy(conn, screen.root) {
-                warn!("Failed to destroy frame for window {}: {}", client.id, err);
+                warn!("Failed to destroy frame for window {}: {}", client.window, err);
             }
             client.frame = None;
         }
         
-        debug!("WM: Unmanaged window {}", client.id);
+        debug!("WM: Unmanaged window {}", client.window);
         Ok(())
     }
     
@@ -514,7 +657,7 @@ impl WindowManager {
         let client = windows.get_mut(&window_id)
             .context("Window not found")?;
         
-        if client.state.maximized {
+        if client.is_maximized() {
             self.restore_window(conn, client)?;
         } else {
             self.maximize_window(conn, client)?;
@@ -529,11 +672,11 @@ impl WindowManager {
         conn: &RustConnection,
         client: &mut Client,
     ) -> Result<()> {
-        info!("Maximizing window {}", client.id);
+        info!("Maximizing window {}", client.window);
         
         // Save restore geometry
-        if !client.state.maximized {
-            client.restore_geometry = Some(client.geometry);
+        if !client.is_maximized() {
+            client.set_restore_geometry(Some(client.geometry));
         }
         
         // Get screen size
@@ -555,11 +698,12 @@ impl WindowManager {
         client.geometry.y = (BORDER_WIDTH + TITLEBAR_HEIGHT) as i32;
         client.geometry.width = frame_width;
         client.geometry.height = frame_height - TITLEBAR_HEIGHT;
-        client.state.maximized = true;
+        client.flags.insert(crate::wm::client_flags::ClientFlags::MAXIMIZED_VERT);
+        client.flags.insert(crate::wm::client_flags::ClientFlags::MAXIMIZED_HORIZ);
         
         // Resize frame and client window
         if let Some(frame_state) = &client.frame {
-            let frame = decorations::WindowFrame::from_state(client.id, frame_state);
+            let frame = decorations::WindowFrame::from_state(client.window, frame_state);
             
             // Move frame so its border is flush with screen edge
             // Frame position: (BORDER_WIDTH, BORDER_WIDTH) to account for borders
@@ -575,7 +719,7 @@ impl WindowManager {
         } else {
             // No frame, resize client directly
             conn.configure_window(
-                client.id,
+                client.window,
                 &ConfigureWindowAux::new()
                     .x(0)
                     .y(0)
@@ -589,11 +733,11 @@ impl WindowManager {
         }
         
         // Update EWMH state
-        if let Err(e) = self.atoms.set_window_state(conn, client.id, &[
+        if let Err(e) = self.atoms.set_window_state(conn, client.window, &[
             self.atoms._net_wm_state_maximized_vert,
             self.atoms._net_wm_state_maximized_horz,
         ], &[]) {
-            warn!("Failed to update maximized state for window {}: {}", client.id, e);
+            warn!("Failed to update maximized state for window {}: {}", client.window, e);
         }
         
         conn.flush()?;
@@ -607,16 +751,16 @@ impl WindowManager {
         client: &mut Client,
         fullscreen: bool,
     ) -> Result<()> {
-        debug!("Setting fullscreen={} for window {}", fullscreen, client.id);
+        debug!("Setting fullscreen={} for window {}", fullscreen, client.window);
         
         if fullscreen {
             // Save geometry before entering fullscreen
-            if !client.state.fullscreen {
-                client.restore_geometry = Some(client.geometry);
+            if !client.is_fullscreen() {
+                client.set_restore_geometry(Some(client.geometry));
             }
             
             // Set fullscreen flag
-            client.state.fullscreen = true;
+            client.flags.insert(crate::wm::client_flags::ClientFlags::FULLSCREEN);
             
             // Get screen dimensions
             let screen = &conn.setup().roots[self.screen_num];
@@ -633,12 +777,12 @@ impl WindowManager {
             // If window has a frame, unmap it and configure client directly
             // This ensures decorations are not visible during fullscreen
             if let Some(frame_state) = &client.frame {
-                let frame = decorations::WindowFrame::from_state(client.id, frame_state);
+                let frame = decorations::WindowFrame::from_state(client.window, frame_state);
                 // Unmap the frame window to hide decorations
                 conn.unmap_window(frame.frame)?;
                 // Configure client directly at screen 0,0 with screen dimensions
                 conn.configure_window(
-                    client.id,
+                    client.window,
                     &ConfigureWindowAux::new()
                         .x(0)
                         .y(0)
@@ -649,7 +793,7 @@ impl WindowManager {
             } else {
                 // No frame - configure client directly
                 conn.configure_window(
-                    client.id,
+                    client.window,
                     &ConfigureWindowAux::new()
                         .x(0)
                         .y(0)
@@ -660,27 +804,27 @@ impl WindowManager {
             }
             
             // Set NET_FRAME_EXTENTS to 0,0,0,0 (no decorations visible)
-            self.atoms.update_frame_extents(conn, client.id, 0, 0, 0, 0)?;
+            self.atoms.update_frame_extents(conn, client.window, 0, 0, 0, 0)?;
             
             // Update EWMH state - add FULLSCREEN and ABOVE (always on top)
             // FULLSCREEN windows should always be on top, so set ABOVE state
             self.atoms.set_window_state(
                 conn,
-                client.id,
+                client.window,
                 &[self.atoms._net_wm_state_fullscreen, self.atoms._net_wm_state_above],
                 &[],
             )?;
         } else {
             // Exit fullscreen: restore geometry
-            client.state.fullscreen = false;
+            client.flags.remove(crate::wm::client_flags::ClientFlags::FULLSCREEN);
             
-            if let Some(restore) = client.restore_geometry {
+            if let Some(restore) = client.restore_geometry() {
                 client.geometry = restore;
                 
                 // Restore client window geometry
                 if let Some(frame_state) = &client.frame {
                     // Window has frame - map it back and restore frame position and client position relative to frame
-                    let frame = decorations::WindowFrame::from_state(client.id, frame_state);
+                    let frame = decorations::WindowFrame::from_state(client.window, frame_state);
                     const TITLEBAR_HEIGHT: i32 = 32;
                     const BORDER_WIDTH: i32 = 2;
                     
@@ -706,7 +850,7 @@ impl WindowManager {
                     
                     // Client is positioned relative to frame
                     conn.configure_window(
-                        client.id,
+                        client.window,
                         &ConfigureWindowAux::new()
                             .x(BORDER_WIDTH)
                             .y((TITLEBAR_HEIGHT + BORDER_WIDTH) as i32)
@@ -716,7 +860,7 @@ impl WindowManager {
                 } else {
                     // No frame - restore client directly
                     conn.configure_window(
-                        client.id,
+                        client.window,
                         &ConfigureWindowAux::new()
                             .x(restore.x)
                             .y(restore.y)
@@ -725,22 +869,22 @@ impl WindowManager {
                     )?;
                 }
                 
-                client.restore_geometry = None;
+                client.set_restore_geometry(None);
             } else {
-                warn!("Cannot restore window {} - no saved geometry found", client.id);
+                warn!("Cannot restore window {} - no saved geometry found", client.window);
             }
             
             // Restore NET_FRAME_EXTENTS (Top: 32 titlebar, Left/Right/Bottom: 2 border)
             if client.frame.is_some() {
-                self.atoms.update_frame_extents(conn, client.id, 2, 2, 32, 2)?;
+                self.atoms.update_frame_extents(conn, client.window, 2, 2, 32, 2)?;
             } else {
-                self.atoms.update_frame_extents(conn, client.id, 0, 0, 0, 0)?;
+                self.atoms.update_frame_extents(conn, client.window, 0, 0, 0, 0)?;
             }
             
             // Remove EWMH fullscreen and ABOVE state
             self.atoms.set_window_state(
                 conn,
-                client.id,
+                client.window,
                 &[],
                 &[self.atoms._net_wm_state_fullscreen, self.atoms._net_wm_state_above],
             )?;
@@ -756,15 +900,15 @@ impl WindowManager {
         conn: &RustConnection,
         client: &mut Client,
     ) -> Result<()> {
-        info!("Restoring window {}", client.id);
+        info!("Restoring window {}", client.window);
         
         // Restore from saved geometry
-        if let Some(restore) = client.restore_geometry {
+        if let Some(restore) = client.restore_geometry() {
             client.geometry = restore;
             
             // Restore frame and client window
             if let Some(frame_state) = &client.frame {
-                let frame = decorations::WindowFrame::from_state(client.id, frame_state);
+                let frame = decorations::WindowFrame::from_state(client.window, frame_state);
                 // Frame position needs to account for titlebar - client is reparented at (0, TITLEBAR_HEIGHT)
                 // So if client.geometry.y is the client content position, frame should be at y - TITLEBAR_HEIGHT
                 const TITLEBAR_HEIGHT: i32 = 32;
@@ -781,7 +925,7 @@ impl WindowManager {
             } else {
                 // No frame, restore client directly
                 conn.configure_window(
-                    client.id,
+                    client.window,
                     &ConfigureWindowAux::new()
                         .x(client.geometry.x)
                         .y(client.geometry.y)
@@ -790,16 +934,17 @@ impl WindowManager {
                 )?;
             }
         } else {
-            warn!("Cannot restore window {} - no saved geometry found", client.id);
+            warn!("Cannot restore window {} - no saved geometry found", client.window);
         }
         
-        client.state.maximized = false;
-        client.restore_geometry = None;
+        client.flags.remove(crate::wm::client_flags::ClientFlags::MAXIMIZED_VERT);
+        client.flags.remove(crate::wm::client_flags::ClientFlags::MAXIMIZED_HORIZ);
+        client.set_restore_geometry(None);
         
         // Remove EWMH maximize state
         self.atoms.set_window_state(
             conn,
-            client.id,
+            client.window,
             &[],
             &[self.atoms._net_wm_state_maximized_vert, 
               self.atoms._net_wm_state_maximized_horz],
@@ -828,8 +973,8 @@ impl WindowManager {
             conn.unmap_window(window_id)?;
         }
         
-        client.mapped = false;
-        client.state.minimized = true;
+        client.set_mapped(false);
+        client.flags.insert(crate::wm::client_flags::ClientFlags::ICONIFIED);
         
         conn.flush()?;
         Ok(())
@@ -842,23 +987,81 @@ impl WindowManager {
         windows: &mut HashMap<u32, Client>,
         window_id: u32,
     ) -> Result<()> {
+        // #region agent log
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write;
+            let log_entry = serde_json::json!({
+                "sessionId": "debug-session",
+                "runId": "run1",
+                "hypothesisId": "B",
+                "location": "wm/mod.rs:960",
+                "message": "set_focus called",
+                "data": {"window_id": window_id, "has_frame": windows.get(&window_id).and_then(|c| c.frame.as_ref().map(|_| true)).unwrap_or(false)},
+                "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+            });
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("/home/bizkit/GitHub/area/.cursor/debug.log") {
+                let _ = writeln!(file, "{}", log_entry);
+            }
+        }
+        // #endregion
+        
         // Unfocus previous window
         for client in windows.values_mut() {
-            if client.focused && client.id != window_id {
-                client.focused = false;
+            if client.focused() && client.window != window_id {
+                client.set_focused(false);
             }
         }
         
         // Focus new window
         if let Some(client) = windows.get_mut(&window_id) {
-            client.focused = true;
+            client.set_focused(true);
+            
+            // #region agent log
+            {
+                use std::fs::OpenOptions;
+                use std::io::Write;
+                let log_entry = serde_json::json!({
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "B",
+                    "location": "wm/mod.rs:978",
+                    "message": "Calling set_input_focus",
+                    "data": {"window_id": window_id, "has_frame": client.frame.is_some()},
+                    "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+                });
+                if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("/home/bizkit/GitHub/area/.cursor/debug.log") {
+                    let _ = writeln!(file, "{}", log_entry);
+                }
+            }
+            // #endregion
             
             // Set X11 input focus
-            conn.set_input_focus(
+            let focus_result = conn.set_input_focus(
                 InputFocus::POINTER_ROOT,
                 window_id,
                 x11rb::CURRENT_TIME,
-            )?;
+            );
+            
+            // #region agent log
+            {
+                use std::fs::OpenOptions;
+                use std::io::Write;
+                let log_entry = serde_json::json!({
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "B",
+                    "location": "wm/mod.rs:985",
+                    "message": "set_input_focus result",
+                    "data": {"window_id": window_id, "success": focus_result.is_ok(), "error": focus_result.as_ref().err().map(|e| format!("{:?}", e))},
+                    "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+                });
+                if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("/home/bizkit/GitHub/area/.cursor/debug.log") {
+                    let _ = writeln!(file, "{}", log_entry);
+                }
+            }
+            focus_result?;
+            // #endregion
             
             // Raise window to top
             if let Some(frame) = &client.frame {
@@ -893,6 +1096,25 @@ impl WindowManager {
         start_x: i16,
         start_y: i16,
     ) -> Result<()> {
+        // #region agent log
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write;
+            let log_entry = serde_json::json!({
+                "sessionId": "debug-session",
+                "runId": "run1",
+                "hypothesisId": "C",
+                "location": "wm/mod.rs:1009",
+                "message": "start_drag called",
+                "data": {"window_id": window_id, "start_x": start_x, "start_y": start_y},
+                "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+            });
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("/home/bizkit/GitHub/area/.cursor/debug.log") {
+                let _ = writeln!(file, "{}", log_entry);
+            }
+        }
+        // #endregion
+        
         let client = windows.get(&window_id)
             .context("Window not found")?;
         
@@ -913,6 +1135,7 @@ impl WindowManager {
             x11rb::CURRENT_TIME,
         );
         
+        let grab_success = grab_result.is_ok();
         if let Err(e) = grab_result {
             warn!("Failed to grab pointer for drag: {:?}", e);
         }
@@ -926,6 +1149,30 @@ impl WindowManager {
             window_start_y: client.geometry.y,
         });
         
+        // #region agent log
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write;
+            let log_entry = serde_json::json!({
+                "sessionId": "debug-session",
+                "runId": "run1",
+                "hypothesisId": "C",
+                "location": "wm/mod.rs:1048",
+                "message": "drag_state set",
+                "data": {
+                    "window_id": window_id,
+                    "window_start_x": client.geometry.x,
+                    "window_start_y": client.geometry.y,
+                    "grab_success": grab_success
+                },
+                "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+            });
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("/home/bizkit/GitHub/area/.cursor/debug.log") {
+                let _ = writeln!(file, "{}", log_entry);
+            }
+        }
+        // #endregion
+        
         conn.flush()?;
         Ok(())
     }
@@ -938,6 +1185,26 @@ impl WindowManager {
         current_x: i16,
         current_y: i16,
     ) -> Result<()> {
+        // #region agent log
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write;
+            let has_drag = self.drag_state.is_some();
+            let log_entry = serde_json::json!({
+                "sessionId": "debug-session",
+                "runId": "run1",
+                "hypothesisId": "C",
+                "location": "wm/mod.rs:1055",
+                "message": "update_drag called",
+                "data": {"current_x": current_x, "current_y": current_y, "has_drag_state": has_drag},
+                "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+            });
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("/home/bizkit/GitHub/area/.cursor/debug.log") {
+                let _ = writeln!(file, "{}", log_entry);
+            }
+        }
+        // #endregion
+        
         if let Some(ref drag) = self.drag_state {
             let client = windows.get_mut(&drag.window_id)
                 .context("Window not found")?;
@@ -953,6 +1220,25 @@ impl WindowManager {
             client.geometry.x = new_x;
             client.geometry.y = new_y;
             
+            // #region agent log
+            {
+                use std::fs::OpenOptions;
+                use std::io::Write;
+                let log_entry = serde_json::json!({
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "C",
+                    "location": "wm/mod.rs:1075",
+                    "message": "Updating window position",
+                    "data": {"window_id": drag.window_id, "new_x": new_x, "new_y": new_y, "has_frame": client.frame.is_some()},
+                    "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+                });
+                if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("/home/bizkit/GitHub/area/.cursor/debug.log") {
+                    let _ = writeln!(file, "{}", log_entry);
+                }
+            }
+            // #endregion
+            
             // Move frame (if exists)
             if let Some(frame) = &client.frame {
                 const TITLEBAR_HEIGHT: u32 = 32;
@@ -966,7 +1252,7 @@ impl WindowManager {
             } else {
                 // No frame, move client window directly
                 conn.configure_window(
-                    client.id,
+                    client.window,
                     &ConfigureWindowAux::new()
                         .x(new_x)
                         .y(new_y),

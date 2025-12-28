@@ -1,12 +1,14 @@
 #!/bin/bash
 # Area Desktop Session
-# Activates systemd user service for unified area WM+Compositor
+# Single unified session script that waits for Area to be ready before launching apps
 
-# Don't exit on errors - we want the session to keep running
-set +e
+set +e  # Don't exit on errors - we want the session to keep running
+
+# ============================================================================
+# Environment Setup
+# ============================================================================
 
 # Robustness: Reset failed units from previous session
-# This prevents failed units from breaking the new session startup
 for unit in $(systemctl --user --no-legend --state=failed --plain list-units | cut -f1 -d' '); do
     partof="$(systemctl --user show -p PartOf --value "$unit")"
     for target in area-desktop.target graphical-session.target; do
@@ -18,30 +20,86 @@ for unit in $(systemctl --user --no-legend --state=failed --plain list-units | c
 done
 
 # Source /etc/profile for system-wide environment variables
-# This ensures important system-wide settings are available
 if [ -f /etc/profile ]; then
     source /etc/profile
 fi
 
-# Export runtime dir (should already be set by LightDM, but ensure it exists)
+# CRITICAL: Import environment from LightDM FIRST (before any modifications)
+# LightDM sets DISPLAY, XAUTHORITY, XDG_RUNTIME_DIR, etc. via PAM
+# We must preserve these exactly as LightDM set them - don't override!
+systemctl --user import-environment
+
+# Now verify and set defaults only if missing (don't override LightDM's values)
+# Export runtime dir (LightDM sets this, but ensure it exists)
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+mkdir -p "$XDG_RUNTIME_DIR"
+
+# Set desktop environment identifiers
 export XDG_CURRENT_DESKTOP=Area
 export XDG_SESSION_TYPE=x11
 
-# Ensure DISPLAY is set (LightDM should set this, but ensure it's exported)
+# Ensure DISPLAY is set (LightDM should set this, but don't override if it exists)
 if [ -z "$DISPLAY" ]; then
-    echo "Warning: DISPLAY not set, defaulting to :0" >&2
+    echo "Warning: DISPLAY not set by LightDM, defaulting to :0" >&2
     export DISPLAY=:0
+fi
+# Always export DISPLAY to ensure it's available
+export DISPLAY
+
+# CRITICAL: XAUTHORITY handling - LightDM sets this via PAM
+# We should NOT override it, only ensure it's exported and available
+if [ -z "$XAUTHORITY" ]; then
+    # LightDM didn't set it - try to find it (fallback for non-standard setups)
+    if [ -f "$HOME/.Xauthority" ]; then
+        export XAUTHORITY="$HOME/.Xauthority"
+        echo "Found XAUTHORITY at $HOME/.Xauthority (fallback)"
+    elif [ -f "/run/user/$(id -u)/gdm/Xauthority" ]; then
+        export XAUTHORITY="/run/user/$(id -u)/gdm/Xauthority"
+        echo "Found XAUTHORITY at /run/user/$(id -u)/gdm/Xauthority (fallback)"
+    elif [ -f "/var/run/gdm3/$(id -u)/Xauthority" ]; then
+        export XAUTHORITY="/var/run/gdm3/$(id -u)/Xauthority"
+        echo "Found XAUTHORITY at /var/run/gdm3/$(id -u)/Xauthority (fallback)"
+    else
+        echo "ERROR: XAUTHORITY not set by LightDM and not found in fallback locations!" >&2
+        echo "  This will cause X11 applications to fail." >&2
+        echo "  Check your LightDM PAM configuration (should include pam_env.so)" >&2
+    fi
 else
-    export DISPLAY
+    # LightDM set it - use it exactly as provided
+    export XAUTHORITY
+    echo "Using XAUTHORITY from LightDM: $XAUTHORITY"
 fi
 
-# Save environment variables that will be added to systemd
-# This allows us to clean them up later
-new_env=$(systemctl --user show-environment | cut -d'=' -f 1 | sort | comm -13 - <(env | cut -d'=' -f 1 | sort))
+# Add navigator development path to PATH
+if [ -d "$HOME/GitHub/xfce-rs/target/release" ]; then
+    export PATH="$HOME/GitHub/xfce-rs/target/release:$PATH"
+elif [ -d "$HOME/GitHub/xfce-rs/navigator/target/release" ]; then
+    export PATH="$HOME/GitHub/xfce-rs/navigator/target/release:$PATH"
+fi
 
-# Import environment variables from the login manager
-systemctl --user import-environment
+# CRITICAL: Set environment variables in systemd AFTER we've ensured they're correct
+# This ensures systemd services inherit the correct values from LightDM
+if [ -n "$DISPLAY" ]; then
+    systemctl --user set-environment "DISPLAY=$DISPLAY"
+fi
+
+if [ -n "$XAUTHORITY" ]; then
+    systemctl --user set-environment "XAUTHORITY=$XAUTHORITY"
+    echo "Set XAUTHORITY in systemd environment: $XAUTHORITY"
+else
+    echo "ERROR: Cannot proceed without XAUTHORITY!" >&2
+    echo "  LightDM should set this automatically via PAM." >&2
+    echo "  Check your LightDM PAM configuration (should include pam_env.so)" >&2
+    exit 1
+fi
+
+# Also set other important variables for systemd services
+systemctl --user set-environment "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+systemctl --user set-environment "XDG_CURRENT_DESKTOP=Area"
+systemctl --user set-environment "XDG_SESSION_TYPE=x11"
+
+# Save environment variables that will be added to systemd (for cleanup later)
+new_env=$(systemctl --user show-environment | cut -d'=' -f 1 | sort | comm -13 - <(env | cut -d'=' -f 1 | sort))
 
 # Ensure systemd user services directory exists
 SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
@@ -56,107 +114,207 @@ fi
 # Reload systemd user daemon to pick up any new service files
 systemctl --user daemon-reload
 
+# ============================================================================
+# Start Area WM+Compositor
+# ============================================================================
+
+echo "Starting Area WM+Compositor..."
+
+# Verify XAUTHORITY is set in systemd environment before starting service
+if ! systemctl --user show-environment 2>/dev/null | grep -q "^XAUTHORITY="; then
+    echo "ERROR: XAUTHORITY not set in systemd environment!" >&2
+    echo "  This will cause Area to fail with 'Authorization required' error." >&2
+    echo "  Attempting to set it now..." >&2
+    if [ -n "$XAUTHORITY" ]; then
+        systemctl --user set-environment "XAUTHORITY=$XAUTHORITY"
+        echo "  Set XAUTHORITY=$XAUTHORITY"
+    else
+        echo "  FATAL: Cannot proceed without XAUTHORITY" >&2
+        exit 1
+    fi
+fi
+
 # Enable and start the desktop target
-# Use --wait to block until the service is ready
 systemctl --user enable area-desktop.target
 systemctl --wait --user start area-desktop.target
 
-# Ensure DISPLAY is set for all child processes
-export DISPLAY="${DISPLAY:-:0}"
+# ============================================================================
+# Wait for Area Ready Signal
+# ============================================================================
 
-# Wait for Area WM+Compositor to be fully initialized before launching apps
-echo "Waiting for Area WM+Compositor to initialize..."
+echo "Waiting for Area WM+Compositor to be ready..."
 
-# First, wait for service to be active (with timeout)
-MAX_WAIT_SERVICE=10  # Max seconds to wait for service to start
-for i in $(seq 1 $((MAX_WAIT_SERVICE * 5))); do  # Check every 200ms
-    if systemctl --user is-active --quiet area.service; then
-        echo "Area service is active"
-        break
-    fi
+READY_FILE="${XDG_RUNTIME_DIR}/area-ready"
+MAX_WAIT=30  # Maximum seconds to wait
+elapsed=0
+
+# Wait for service to be active first
+while ! systemctl --user is-active --quiet area.service && [ $elapsed -lt 10 ]; do
     sleep 0.2
-    if [ $i -eq $((MAX_WAIT_SERVICE * 5)) ]; then
-        echo "Warning: area.service did not become active within ${MAX_WAIT_SERVICE}s" >&2
+    elapsed=$((elapsed + 1))
+done
+
+if ! systemctl --user is-active --quiet area.service; then
+    echo "Warning: area.service did not become active within 10s" >&2
+fi
+
+# Wait for ready signal file
+elapsed=0
+while [ ! -f "$READY_FILE" ] && [ $elapsed -lt $MAX_WAIT ]; do
+    sleep 0.5
+    elapsed=$((elapsed + 1))
+    if [ $((elapsed % 2)) -eq 0 ]; then
+        echo "  Still waiting... (${elapsed}s/${MAX_WAIT}s)"
     fi
 done
 
-# Now wait for area to be fully initialized (GLX context, compositor, WM ready)
-# We check for "Starting main event loop" log message which signals readiness
-if systemctl --user is-active --quiet area.service; then
-    echo "Waiting for Area WM+Compositor to be fully ready..."
-    MAX_WAIT_READY=15  # Max seconds to wait for readiness
-    ready=false
+if [ -f "$READY_FILE" ]; then
+    echo "✓ Area WM+Compositor is ready!"
+    rm -f "$READY_FILE"  # Clean up
+else
+    echo "Warning: Area ready signal not received within ${MAX_WAIT}s, proceeding anyway..." >&2
+fi
+
+# Small delay to ensure everything is settled
+sleep 0.5
+
+# ============================================================================
+# Launch Applications (only after Area is ready)
+# ============================================================================
+
+echo ""
+echo "Launching applications..."
+
+# Single unified launch function - handles desktop files and commands
+launch_app() {
+    local app_name="$1"
+    local app_id_or_command="$2"
+    shift 2
+    local app_args="$@"
     
-    for i in $(seq 1 $((MAX_WAIT_READY * 5))); do  # Check every 200ms
-        # Check journal logs for "Starting main event loop" message
-        if journalctl --user -u area.service --since "2 seconds ago" --no-pager 2>/dev/null | grep -q "Starting main event loop"; then
-            echo "Area WM+Compositor is ready!"
-            ready=true
-            break
+    local log_file="${XDG_RUNTIME_DIR:-/tmp}/${app_name}.log"
+    
+    # Try desktop file first (proper way)
+    if command -v xdg-open >/dev/null 2>&1; then
+        for dir in "$HOME/.local/share/applications" "/usr/share/applications"; do
+            if [ -f "$dir/${app_id_or_command}.desktop" ]; then
+                echo "  → $app_name"
+                # Log errors to file for debugging, but don't block
+                DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" xdg-open "$dir/${app_id_or_command}.desktop" >"$log_file" 2>&1 &
+                local app_pid=$!
+                # Check if it's still running after a short delay
+                sleep 0.3
+                if ! kill -0 "$app_pid" 2>/dev/null; then
+                    echo "    ⚠ Failed to launch $app_name - check $log_file for errors" >&2
+                    return 1
+                fi
+                return 0
+            fi
+        done
+    fi
+    
+    # Fallback: try gtk-launch
+    if command -v gtk-launch >/dev/null 2>&1; then
+        if [ -f "$HOME/.local/share/applications/${app_id_or_command}.desktop" ] || \
+           [ -f "/usr/share/applications/${app_id_or_command}.desktop" ]; then
+            echo "  → $app_name"
+            DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" gtk-launch "$app_id_or_command" "$@" >"$log_file" 2>&1 &
+            local app_pid=$!
+            sleep 0.3
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+                echo "    ⚠ Failed to launch $app_name - check $log_file for errors" >&2
+                return 1
+            fi
+            return 0
         fi
-        sleep 0.2
-    done
-    
-    if [ "$ready" = false ]; then
-        echo "Warning: Area did not signal readiness, but proceeding anyway..." >&2
     fi
     
-    # Small additional delay to ensure everything is settled
-    sleep 0.3
-fi
-
-# Launch area-focus for keyboard input and focus management
-echo "Launching area-focus..."
-if command -v area-focus >/dev/null 2>&1; then
-    DISPLAY="$DISPLAY" area-focus > "${XDG_RUNTIME_DIR:-/tmp}/area-focus.log" 2>&1 &
-    echo "area-focus started (PID: $!)"
-elif [ -f "$HOME/.local/bin/area-focus" ]; then
-    DISPLAY="$DISPLAY" "$HOME/.local/bin/area-focus" > "${XDG_RUNTIME_DIR:-/tmp}/area-focus.log" 2>&1 &
-    echo "area-focus started (PID: $!)"
-fi
-
-sleep 1
-
-# Launch cosmic-term by default (primary terminal)
-echo "Launching cosmic-term..."
-if command -v cosmic-term >/dev/null 2>&1; then
-    DISPLAY="$DISPLAY" cosmic-term >/dev/null 2>&1 &
-    echo "cosmic-term started (PID: $!)"
-elif [ -f "$HOME/.local/bin/cosmic-term" ]; then
-    DISPLAY="$DISPLAY" "$HOME/.local/bin/cosmic-term" >/dev/null 2>&1 &
-    echo "cosmic-term started (PID: $!)"
-else
-    echo "Warning: cosmic-term not found, trying fallback terminals..." >&2
-    # Fallback to other terminals if cosmic-term not available
-    if command -v alacritty >/dev/null 2>&1; then
-        DISPLAY="$DISPLAY" alacritty &
-    elif command -v xterm >/dev/null 2>&1; then
-        DISPLAY="$DISPLAY" xterm &
-    elif command -v xfce4-terminal >/dev/null 2>&1; then
-        DISPLAY="$DISPLAY" xfce4-terminal &
+    # Last resort: direct command launch
+    if command -v "$app_id_or_command" >/dev/null 2>&1; then
+        echo "  → $app_name"
+        DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" "$app_id_or_command" $app_args >"$log_file" 2>&1 &
+        local app_pid=$!
+        sleep 0.3
+        if ! kill -0 "$app_pid" 2>/dev/null; then
+            echo "    ⚠ Failed to launch $app_name - check $log_file for errors" >&2
+            return 1
+        fi
+        return 0
     fi
+    
+    echo "    ⚠ $app_name not found (command: $app_id_or_command)" >&2
+    return 1
+}
+
+# Launch terminal (xfce4-terminal)
+if ! launch_app "xfce4-terminal" "xfce4-terminal"; then
+    launch_app "alacritty" "alacritty" || \
+    launch_app "xterm" "xterm"
 fi
 
-sleep 1
+sleep 0.5
 
-# Launch navigator by default (application launcher)
-echo "Launching navigator..."
+# Launch navigator (application launcher)
+NAVIGATOR_BIN=""
 if command -v navigator >/dev/null 2>&1; then
-    DISPLAY="$DISPLAY" navigator >/dev/null 2>&1 &
-    echo "navigator started (PID: $!)"
+    NAVIGATOR_BIN="$(command -v navigator)"
 elif [ -f "$HOME/.local/bin/navigator" ]; then
-    DISPLAY="$DISPLAY" "$HOME/.local/bin/navigator" >/dev/null 2>&1 &
-    echo "navigator started (PID: $!)"
-else
-    echo "Warning: navigator not found" >&2
+    NAVIGATOR_BIN="$HOME/.local/bin/navigator"
+elif [ -f "/usr/local/bin/navigator" ]; then
+    NAVIGATOR_BIN="/usr/local/bin/navigator"
+elif [ -f "$HOME/GitHub/xfce-rs/target/release/navigator" ]; then
+    NAVIGATOR_BIN="$HOME/GitHub/xfce-rs/target/release/navigator"
+elif [ -f "$HOME/GitHub/xfce-rs/navigator/target/release/navigator" ]; then
+    NAVIGATOR_BIN="$HOME/GitHub/xfce-rs/navigator/target/release/navigator"
 fi
 
-sleep 1
+if [ -n "$NAVIGATOR_BIN" ] && [ -x "$NAVIGATOR_BIN" ]; then
+    echo "  → navigator"
+    DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" "$NAVIGATOR_BIN" > "${XDG_RUNTIME_DIR}/navigator.log" 2>&1 &
+fi
 
-echo "Area desktop session started. Applications launched."
+sleep 0.5
+
+# Launch area-focus if available
+if command -v area-focus >/dev/null 2>&1; then
+    echo "  → area-focus"
+    DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" area-focus > "${XDG_RUNTIME_DIR}/area-focus.log" 2>&1 &
+elif [ -f "$HOME/.local/bin/area-focus" ]; then
+    echo "  → area-focus"
+    DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" "$HOME/.local/bin/area-focus" > "${XDG_RUNTIME_DIR}/area-focus.log" 2>&1 &
+fi
+
+# ============================================================================
+# ADD YOUR STARTUP APPLICATIONS HERE
+# ============================================================================
+# Use the launch_app helper function to add more applications:
+#
+#   launch_app "app-name" "command" [args...]
+#
+# Examples:
+#   launch_app "chromium" "chromium"
+#   launch_app "firefox" "firefox" "--new-window"
+#   launch_app "thunar" "thunar"
+#   launch_app "gedit" "gedit" "/path/to/file.txt"
+#
+# The launch_app function automatically:
+#   - Checks if the command exists
+#   - Sets DISPLAY and XAUTHORITY
+#   - Launches in background
+#   - Returns 0 on success, 1 on failure
+#
+# You can also launch apps directly:
+#   DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" your-app >/dev/null 2>&1 &
+# ============================================================================
+
+echo ""
+echo "✓ Area desktop session started. Applications launched."
+
+# ============================================================================
+# Keep Session Running
+# ============================================================================
 
 # Keep the session running - wait for area-desktop.target to stop
-# This prevents the session from exiting immediately
 while systemctl --user is-active --quiet area-desktop.target; do
     sleep 1
 done
@@ -164,5 +322,4 @@ done
 echo "Area desktop session ending..."
 
 # Cleanup: Unset environment variables that we added
-# This prevents them from persisting after session ends
 systemctl --user unset-environment $new_env

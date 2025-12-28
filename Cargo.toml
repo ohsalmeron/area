@@ -72,11 +72,13 @@ tracing-subscriber = { workspace = true }
 
 # Serialization (for config)
 serde = { workspace = true }
+serde_json = { workspace = true }
 toml = "0.8"
 
 # Utilities
 dirs = { workspace = true }
 bytemuck = "1.14"
+bitflags = "2.5"
 
 # Async I/O polling (for X11 events)
 mio = { version = "1.0", features = ["os-ext"] }

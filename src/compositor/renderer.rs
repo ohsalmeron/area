@@ -212,9 +212,9 @@ impl Renderer {
                 
                 let old_x11 = win_tex.x11_pixmap;
                 
-                // DON'T bind here - we use strict binding mode (bind every frame)
-                // Like compiz: if (!strictBinding) { bindTexImage } - we skip this since strictBinding=true
-                trace!("Created GLX pixmap {} for existing texture {} for window {} (strict binding - will bind every frame)", new_glx_pixmap, win_tex.texture, window_id);
+                // Note: We use damage-based binding (bind when damaged=true)
+                // The window will be marked as damaged when pixmap is created, ensuring initial bind
+                trace!("Created GLX pixmap {} for existing texture {} for window {} (will bind on damage)", new_glx_pixmap, win_tex.texture, window_id);
 
                 win_tex.glx_pixmap = Some(new_glx_pixmap);
                 win_tex.x11_pixmap = Some(x11_pixmap);
@@ -234,9 +234,9 @@ impl Renderer {
                 gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
                 gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
                 
-                // DON'T bind here - we use strict binding mode (bind every frame)
-                // Like compiz: if (!strictBinding) { bindTexImage } - we skip this since strictBinding=true
-                trace!("Created GLX pixmap {} for new texture {} for window {} (strict binding - will bind every frame)", new_glx_pixmap, texture, window_id);
+                // Note: We use damage-based binding (bind when damaged=true)
+                // The window will be marked as damaged when pixmap is created, ensuring initial bind
+                trace!("Created GLX pixmap {} for new texture {} for window {} (will bind on damage)", new_glx_pixmap, texture, window_id);
                 gl::BindTexture(gl::TEXTURE_2D, 0);
 
                 // Get pixmap dimensions for tracking
@@ -267,6 +267,7 @@ impl Renderer {
         screen_height: f32,
         opacity: f32,
         damaged: bool, // Only bind texture if window is damaged
+        frames_since_pixmap: u32, // Number of frames since pixmap was created
     ) {
         let win_tex = match self.textures.get(&window_id) {
             Some(t) => {
@@ -303,29 +304,28 @@ impl Renderer {
             gl::ActiveTexture(gl::TEXTURE0);
             gl::BindTexture(gl::TEXTURE_2D, win_tex.texture);
             
-            // CRITICAL: Bind the pixmap image ONLY when window is damaged (damage-based strict binding)
-            // In strict binding mode, we bind when damage occurs to get the latest content
+            // CRITICAL: Bind the pixmap image EVERY FRAME for GLX TFP
+            // Unlike XRender (used by xfwm4), GLX TFP requires binding textures to get pixmap content
             // The X server updates the pixmap content when window is damaged, and binding makes it available to GL
-            // We only bind when damaged=true (set by DamageNotify events), not every frame
-            // This is the key to performance: only update textures when content actually changes
-            if damaged {
-                if let Some(glx_pixmap) = win_tex.glx_pixmap {
-                    // Clear any previous X errors before binding
-                    use std::sync::atomic::Ordering;
-                    use super::gl_context::{X_ERROR_OCCURRED, X_ERROR_CODE};
+            // We MUST bind every frame to ensure we have the latest content (like Compiz strictBinding=true)
+            // This is necessary because damage events may be delayed or missed, and TFP requires explicit binding
+            if let Some(glx_pixmap) = win_tex.glx_pixmap {
+                // Clear any previous X errors before binding
+                use std::sync::atomic::Ordering;
+                use super::gl_context::{X_ERROR_OCCURRED, X_ERROR_CODE};
+                X_ERROR_OCCURRED.store(false, Ordering::Relaxed);
+                X_ERROR_CODE.store(0, Ordering::Relaxed);
+                
+                // Bind the pixmap to the texture (this updates the texture with pixmap content)
+                // glXBindTexImageEXT replaces any existing binding
+                // We bind every frame to ensure we always have the latest content
+                ctx.bind_tex_image(glx_pixmap);
+                
+                // Check for X errors after binding
+                if X_ERROR_OCCURRED.load(Ordering::Relaxed) {
+                    let error_code = X_ERROR_CODE.load(Ordering::Relaxed);
+                    warn!("X Error during bind_tex_image for window {} (glx_pixmap {}): code={}", window_id, glx_pixmap, error_code);
                     X_ERROR_OCCURRED.store(false, Ordering::Relaxed);
-                    X_ERROR_CODE.store(0, Ordering::Relaxed);
-                    
-                    // Bind the pixmap to the texture (this updates the texture with pixmap content)
-                    // glXBindTexImageEXT replaces any existing binding
-                    ctx.bind_tex_image(glx_pixmap);
-                    
-                    // Check for X errors after binding
-                    if X_ERROR_OCCURRED.load(Ordering::Relaxed) {
-                        let error_code = X_ERROR_CODE.load(Ordering::Relaxed);
-                        warn!("X Error during bind_tex_image for window {} (glx_pixmap {}): code={}", window_id, glx_pixmap, error_code);
-                        X_ERROR_OCCURRED.store(false, Ordering::Relaxed);
-                    }
                 }
             }
 

@@ -37,8 +37,14 @@ pub struct CWindow {
     /// Is the window damaged and needs redraw?
     pub damaged: bool,
     
+    /// Number of frames since pixmap was created (for fallback binding)
+    pub frames_since_pixmap: u32,
+    
     /// Has pixmap binding failed?
     pub bind_failed: bool,
+    
+    /// Have we logged the bind failure? (prevents log spam)
+    pub bind_failure_logged: bool,
     
     /// Is the window redirected?
     pub redirected: bool,
@@ -59,7 +65,9 @@ impl CWindow {
             damage: None,
             opacity: 1.0,
             damaged: false,
+            frames_since_pixmap: 0,
             bind_failed: false,
+            bind_failure_logged: false,
             redirected: false,
             unredirected: false,
         }

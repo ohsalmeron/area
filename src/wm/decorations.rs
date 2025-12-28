@@ -6,6 +6,25 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 
+// #region agent log
+fn debug_log(location: &str, message: &str, data: serde_json::Value, hypothesis_id: &str) {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    let log_entry = serde_json::json!({
+        "sessionId": "debug-session",
+        "runId": "run1",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+    });
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("/home/bizkit/GitHub/area/.cursor/debug.log") {
+        let _ = writeln!(file, "{}", log_entry);
+    }
+}
+// #endregion
+
 /// Represents a window frame with decorations
 #[derive(Debug, Clone)]
 pub struct WindowFrame {
@@ -153,6 +172,16 @@ impl WindowFrame {
         // Reparent client into frame
         conn.reparent_window(client, frame, 0, decorations.titlebar_height as i16)?;
         
+        // #region agent log
+        debug_log("decorations.rs:157", "Frame created, about to map", serde_json::json!({
+            "client": client,
+            "frame": frame,
+            "titlebar": titlebar,
+            "width": width,
+            "height": height
+        }), "A");
+        // #endregion
+        
         // Map all windows (frame first, then client)
         conn.map_window(frame)?;
         conn.map_window(close_button)?;
@@ -161,6 +190,14 @@ impl WindowFrame {
         conn.map_window(titlebar)?;
         // Map the client window so it's visible
         conn.map_window(client)?;
+        
+        // #region agent log
+        debug_log("decorations.rs:170", "Frame windows mapped", serde_json::json!({
+            "client": client,
+            "frame": frame,
+            "all_mapped": true
+        }), "A");
+        // #endregion
 
         Ok(Self {
             client,

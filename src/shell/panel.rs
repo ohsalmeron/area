@@ -4,6 +4,14 @@ use anyhow::Result;
 use crate::shell::logout::LogoutDialog;
 use crate::shell::render;
 
+/// Panel click action
+#[derive(Debug, Clone, Copy)]
+pub enum PanelClickAction {
+    None,
+    LaunchApp,
+    Logout,
+}
+
 /// Panel button constants (hardcoded for now, could be moved to config later)
 const BUTTON_WIDTH: f32 = 80.0;
 const BUTTON_HEIGHT: f32 = 30.0;
@@ -24,6 +32,10 @@ pub struct Panel {
     /// Logout button position
     logout_button_x: f32,
     logout_button_y: f32,
+    
+    /// Launcher button position (left side)
+    launcher_button_x: f32,
+    launcher_button_y: f32,
 }
 
 impl Panel {
@@ -39,6 +51,10 @@ impl Panel {
         let logout_button_x = screen_width as f32 - BUTTON_WIDTH - BUTTON_PADDING;
         let logout_button_y = y + (config.height - BUTTON_HEIGHT) / 2.0;
         
+        // Position launcher button on the left
+        let launcher_button_x = BUTTON_PADDING;
+        let launcher_button_y = y + (config.height - BUTTON_HEIGHT) / 2.0;
+        
         Self {
             screen_width,
             screen_height,
@@ -46,13 +62,27 @@ impl Panel {
             position_top,
             logout_button_x,
             logout_button_y,
+            launcher_button_x,
+            launcher_button_y,
         }
     }
     
     /// Handle mouse click on panel
-    pub fn handle_click(&self, x: i16, y: i16, logout_dialog: &mut LogoutDialog) -> Result<bool> {
+    pub fn handle_click(&self, x: i16, y: i16, logout_dialog: &mut LogoutDialog) -> Result<PanelClickAction> {
         let fx = x as f32;
         let fy = y as f32;
+        
+        // Check if click is on launcher button (left side)
+        if render::point_in_rect(
+            fx,
+            fy,
+            self.launcher_button_x,
+            self.launcher_button_y,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
+        ) {
+            return Ok(PanelClickAction::LaunchApp);
+        }
         
         // Check if click is on logout button
         if render::point_in_rect(
@@ -64,10 +94,10 @@ impl Panel {
             BUTTON_HEIGHT,
         ) {
             logout_dialog.show();
-            return Ok(true);
+            return Ok(PanelClickAction::Logout);
         }
         
-        Ok(false)
+        Ok(PanelClickAction::None)
     }
     
     
@@ -89,6 +119,20 @@ impl Panel {
             self.config.opacity,   // a
         );
         
+        // Render launcher button (left side)
+        renderer.render_rectangle(
+            self.launcher_button_x,
+            self.launcher_button_y,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
+            screen_width,
+            screen_height,
+            0.2,  // r
+            0.4,  // g
+            0.2,  // b
+            0.9,  // a
+        );
+        
         // Render logout button background
         renderer.render_rectangle(
             self.logout_button_x,
@@ -103,8 +147,48 @@ impl Panel {
             0.9,  // a
         );
         
-        // Render logout button border (simple approach: render 4 rectangles)
+        // Render button borders (simple approach: render 4 rectangles)
         let border_width = 2.0;
+        
+        // Launcher button border (green)
+        renderer.render_rectangle(
+            self.launcher_button_x,
+            self.launcher_button_y,
+            BUTTON_WIDTH,
+            border_width,
+            screen_width,
+            screen_height,
+            0.3, 0.6, 0.3, 1.0,  // top border
+        );
+        renderer.render_rectangle(
+            self.launcher_button_x,
+            self.launcher_button_y + BUTTON_HEIGHT - border_width,
+            BUTTON_WIDTH,
+            border_width,
+            screen_width,
+            screen_height,
+            0.3, 0.6, 0.3, 1.0,  // bottom border
+        );
+        renderer.render_rectangle(
+            self.launcher_button_x,
+            self.launcher_button_y,
+            border_width,
+            BUTTON_HEIGHT,
+            screen_width,
+            screen_height,
+            0.3, 0.6, 0.3, 1.0,  // left border
+        );
+        renderer.render_rectangle(
+            self.launcher_button_x + BUTTON_WIDTH - border_width,
+            self.launcher_button_y,
+            border_width,
+            BUTTON_HEIGHT,
+            screen_width,
+            screen_height,
+            0.3, 0.6, 0.3, 1.0,  // right border
+        );
+        
+        // Logout button border (red)
         renderer.render_rectangle(
             self.logout_button_x,
             self.logout_button_y,
@@ -142,8 +226,8 @@ impl Panel {
             0.6, 0.3, 0.3, 1.0,  // right border
         );
         
-        // TODO: Render "Logout" text on button
-        // For now, the button is just a red rectangle
+        // TODO: Render "Apps" and "Logout" text on buttons
+        // For now, buttons are just colored rectangles (green = launcher, red = logout)
     }
     
     /// Get panel height
@@ -170,6 +254,8 @@ impl Panel {
         let y = if self.position_top { 0.0 } else { height as f32 - self.config.height };
         self.logout_button_x = width as f32 - BUTTON_WIDTH - BUTTON_PADDING;
         self.logout_button_y = y + (self.config.height - BUTTON_HEIGHT) / 2.0;
+        self.launcher_button_x = BUTTON_PADDING;
+        self.launcher_button_y = y + (self.config.height - BUTTON_HEIGHT) / 2.0;
     }
 }
 

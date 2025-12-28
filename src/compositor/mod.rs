@@ -191,7 +191,24 @@ impl CompositorInner {
 
         use x11rb::connection::Connection;
         let renderer = gl_context.as_ref().and_then(|_| Renderer::new().ok());
-        let cursor_manager = CursorManager::new(&conn, conn.as_ref().setup().roots[screen_num].root).ok();
+        let mut cursor_manager = CursorManager::new(&conn, conn.as_ref().setup().roots[screen_num].root).ok();
+        
+        // Load initial cursor image and position immediately (don't wait for events)
+        if let Some(ref mut cursor) = cursor_manager {
+            // Load cursor image
+            if let Err(e) = cursor.update_image(&conn) {
+                debug!("Failed to load initial cursor image: {}", e);
+            }
+            
+            // Get initial cursor position from X server
+            let root = conn.as_ref().setup().roots[screen_num].root;
+            if let Ok(cookie) = conn.query_pointer(root) {
+                if let Ok(pointer) = cookie.reply() {
+                    cursor.update_position(pointer.root_x, pointer.root_y);
+                    debug!("Initial cursor position: ({}, {})", pointer.root_x, pointer.root_y);
+                }
+            }
+        }
         // Use default panel config for compositor's shell (it's just for rendering)
         let default_panel_config = crate::config::PanelConfig::default();
         let shell = crate::shell::Shell::new(
@@ -246,9 +263,28 @@ impl CompositorInner {
 
             // Check damage after processing commands
             needs_render = self.any_damaged();
+            
+            // Only render cursor if it moved or is dirty (changed shape/image)
+            // This prevents unnecessary rendering every frame when cursor is idle
+            if let Some(ref cursor) = self.cursor_manager {
+                if cursor.visible {
+                    // Render if cursor image not loaded yet (initial load)
+                    if cursor.width == 0 || cursor.height == 0 {
+                        needs_render = true;
+                    } 
+                    // Render if cursor moved (for smooth movement tracking)
+                    else if cursor.has_moved() {
+                        needs_render = true;
+                    }
+                    // Render if cursor shape/image changed (dirty flag set by XfixesCursorNotify)
+                    else if cursor.dirty {
+                        needs_render = true;
+                    }
+                }
+            }
 
             // Perform rendering
-            if self.any_damaged() {
+            if needs_render {
                 use x11rb::connection::Connection;
                 let (w, h) = {
                     let screen = &self.conn.as_ref().setup().roots[0];
@@ -273,6 +309,25 @@ impl CompositorInner {
     fn handle_command(&mut self, cmd: CompositorCommand) {
         match cmd {
             CompositorCommand::AddWindow(w) => {
+                // #region agent log
+                {
+                    use std::fs::OpenOptions;
+                    use std::io::Write;
+                    let log_entry = serde_json::json!({
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "D",
+                        "location": "compositor/mod.rs:311",
+                        "message": "Compositor AddWindow command",
+                        "data": {"window_id": w.id, "client_id": w.client_id, "viewable": w.viewable, "geometry": {"x": w.geometry.x, "y": w.geometry.y, "width": w.geometry.width, "height": w.geometry.height}},
+                        "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+                    });
+                    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("/home/bizkit/GitHub/area/.cursor/debug.log") {
+                        let _ = writeln!(file, "{}", log_entry);
+                    }
+                }
+                // #endregion
+                
                 use x11rb::connection::Connection;
                 let id = w.id;
                 self.windows.insert(id, w);
@@ -286,6 +341,25 @@ impl CompositorInner {
                 }
                 // Check if window is already fullscreen when added
                 self.handle_window_state_update(id);
+                
+                // #region agent log
+                {
+                    use std::fs::OpenOptions;
+                    use std::io::Write;
+                    let log_entry = serde_json::json!({
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "D",
+                        "location": "compositor/mod.rs:325",
+                        "message": "Window added to compositor windows map",
+                        "data": {"window_id": id, "total_windows": self.windows.len()},
+                        "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+                    });
+                    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("/home/bizkit/GitHub/area/.cursor/debug.log") {
+                        let _ = writeln!(file, "{}", log_entry);
+                    }
+                }
+                // #endregion
             }
             CompositorCommand::RemoveWindow(id) => {
                 if let Some(w) = self.windows.remove(&id) {
@@ -423,12 +497,40 @@ impl CompositorInner {
     
     /// Unredirect a window (allow it to render directly, bypassing compositor)
     fn unredirect_window(&mut self, window_id: u32) {
-        if let Some(window) = self.windows.get_mut(&window_id) {
+        use x11rb::connection::Connection;
+        
+        // Check if window exists and get client_id BEFORE mutable borrow
+        let client_id = if let Some(window) = self.windows.get(&window_id) {
             if window.unredirected {
-                // Already unredirected
-                return;
+                return; // Already unredirected
             }
+            window.client_id
+        } else {
+            return; // Window not found
+        };
+        
+        // Check if window is fullscreen (EWMH or geometry-based) BEFORE mutable borrow
+        let is_fullscreen = {
+            // Check EWMH fullscreen state
+            let ewmh_fullscreen = self.check_ewmh_fullscreen(window_id) || 
+                                 self.check_ewmh_fullscreen(client_id);
             
+            // Check geometry-based fullscreen
+            let screen = &self.conn.as_ref().setup().roots[0];
+            let geometry_fullscreen = if let Some(window) = self.windows.get(&window_id) {
+                window.is_fullscreen(
+                    screen.width_in_pixels,
+                    screen.height_in_pixels,
+                )
+            } else {
+                false
+            };
+            
+            ewmh_fullscreen || geometry_fullscreen
+        };
+        
+        // Now get mutable access to window
+        if let Some(window) = self.windows.get_mut(&window_id) {
             // Unredirect the window using Composite extension
             if let Err(e) = self.conn.as_ref().composite_unredirect_window(
                 window_id,
@@ -442,10 +544,35 @@ impl CompositorInner {
             window.redirected = false;
             self.unredirected_count += 1;
             
-            // Update overlay window visibility if needed
-            // When we have unredirected windows, overlay should be visible
-            // (The overlay window is used for compositing, so we need it even with unredirected windows)
-            debug!("Unredirected window {} (count: {})", window_id, self.unredirected_count);
+            // When we have unredirected fullscreen windows, lower the overlay window below them
+            // This ensures unredirected windows are visible (they render directly to screen)
+            if self.unredirected_count > 0 {
+                // Lower overlay window below unredirected windows so they can render on top
+                if let Err(e) = self.conn.as_ref().configure_window(
+                    self.overlay_window,
+                    &ConfigureWindowAux::new().stack_mode(StackMode::BELOW),
+                ) {
+                    warn!("Failed to lower overlay window below unredirected windows: {}", e);
+                } else {
+                    debug!("Lowered overlay window below unredirected windows (count: {})", self.unredirected_count);
+                }
+            }
+            
+            debug!("Unredirected window {} (count: {}, fullscreen: {})", window_id, self.unredirected_count, is_fullscreen);
+        }
+        
+        // CRITICAL FIX: Raise unredirected fullscreen windows above everything
+        // This ensures they appear on top even when unredirected (rendering directly to screen)
+        // Do this AFTER releasing the mutable borrow of self.windows
+        if is_fullscreen {
+            if let Err(e) = self.conn.as_ref().configure_window(
+                window_id,
+                &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+            ) {
+                warn!("Failed to raise unredirected fullscreen window {}: {}", window_id, e);
+            } else {
+                debug!("Raised unredirected fullscreen window {} above all windows", window_id);
+            }
         }
     }
     
@@ -520,10 +647,18 @@ impl CompositorInner {
             
             // First pass: lazy pixmap binding
             // Skip unmapped/unviewable windows (performance optimization)
+            // CRITICAL: Don't check failed windows every frame - this causes performance issues
             let windows_to_bind: Vec<u32> = self.windows.values()
-                .filter(|w| w.viewable && !renderer.has_texture(w.id) && !w.bind_failed)
+                .filter(|w| {
+                    // Only attempt binding if window is viewable, has no texture, and hasn't failed
+                    w.viewable && !renderer.has_texture(w.id) && !w.bind_failed
+                })
                 .map(|w| w.id)
                 .collect();
+            
+            if !windows_to_bind.is_empty() {
+                debug!("Attempting to create pixmaps for {} window(s): {:?}", windows_to_bind.len(), windows_to_bind);
+            }
             
             for window_id in windows_to_bind {
                 // Get window reference and perform initial checks
@@ -552,7 +687,37 @@ impl CompositorInner {
                     (window.id, !window.redirected)
                 };
                 
+                // CRITICAL: Redirect window BEFORE creating pixmap (required by Composite extension)
                 if needs_redirect {
+                    let composite_id_for_redirect = {
+                        let window = match self.windows.get(&window_id) {
+                            Some(w) => w.client_id,  // Use client_id for redirect
+                            None => continue,
+                        };
+                        window
+                    };
+                    
+                    // Redirect the window using Composite extension
+                    if let Err(e) = conn.composite_redirect_window(
+                        composite_id_for_redirect,
+                        composite::Redirect::MANUAL,
+                    ) {
+                        warn!("Failed to redirect window {} before pixmap creation: {}", composite_id_for_redirect, e);
+                        if let Some(w) = self.windows.get_mut(&window_id) {
+                            w.bind_failed = true;
+                            if !w.bind_failure_logged {
+                                warn!("Window {} marked as bind_failed - will skip future pixmap creation attempts", window_id);
+                                w.bind_failure_logged = true;
+                            }
+                        }
+                        continue;
+                    }
+                    // Flush to ensure redirect request is sent to X server
+                    // X11 requests are generally synchronous, so flush() should be sufficient
+                    // The subsequent get_window_attributes check will verify the redirect took effect
+                    conn.flush().ok();
+                    
+                    // Mark as redirected
                     if let Some(window) = self.windows.get_mut(&window_id) {
                         window.redirected = true;
                     }
@@ -566,12 +731,20 @@ impl CompositorInner {
                     if cookie.reply().is_err() {
                         if let Some(w) = self.windows.get_mut(&window_id) {
                             w.bind_failed = true;
+                            if !w.bind_failure_logged {
+                                warn!("Window {} marked as bind_failed (get_window_attributes failed) - will skip future attempts", window_id);
+                                w.bind_failure_logged = true;
+                            }
                         }
                         continue;
                     }
                 } else {
                     if let Some(w) = self.windows.get_mut(&window_id) {
                         w.bind_failed = true;
+                        if !w.bind_failure_logged {
+                            warn!("Window {} marked as bind_failed (get_window_attributes cookie failed) - will skip future attempts", window_id);
+                            w.bind_failure_logged = true;
+                        }
                     }
                     continue;
                 }
@@ -581,38 +754,45 @@ impl CompositorInner {
                     None => continue,
                 };
 
-                let composite_id = window.id;
+                // Use client_id for pixmap creation - the actual window content is in the client window
+                // window.id might be a frame window (decoration), but we need the client window content
+                let composite_id = window.client_id;
 
                 if let Ok(pixmap) = conn.generate_id() {
+                    debug!("Attempting to create pixmap {} for window {}", pixmap, window_id);
                     match conn.composite_name_window_pixmap(composite_id, pixmap) {
                         Ok(cookie) => {
                             if cookie.check().is_err() {
+                                warn!("composite_name_window_pixmap failed for window {} (pixmap {})", window_id, pixmap);
                                 if let Some(w) = self.windows.get_mut(&window_id) {
                                     w.bind_failed = true;
+                                    if !w.bind_failure_logged {
+                                        warn!("Window {} marked as bind_failed - will skip future pixmap creation attempts", window_id);
+                                        w.bind_failure_logged = true;
+                                    }
                                 }
                                 let _ = conn.free_pixmap(pixmap);
                                 continue;
                             }
+                            // Flush to ensure pixmap creation request is sent to X server
+                            // X11 requests are generally synchronous, so flush() should be sufficient
+                            // The subsequent get_geometry check will verify the pixmap is ready
                             conn.flush().ok();
-                            std::thread::sleep(std::time::Duration::from_millis(10));
                             
                             match conn.get_geometry(pixmap) {
                                 Ok(cookie) => match cookie.reply() {
                                     Ok(pixmap_geom) => {
                                     if pixmap_geom.width == 0 || pixmap_geom.height == 0 {
+                                        debug!("Pixmap {} for window {} has invalid dimensions: {}x{}", pixmap, window_id, pixmap_geom.width, pixmap_geom.height);
                                         let _ = conn.free_pixmap(pixmap);
                                         continue;
                                     }
                                     
-                                    let outer = window.outer_geometry();
-                                    if pixmap_geom.width != outer.width as u16 || pixmap_geom.height != outer.height as u16 {
-                                        let _ = conn.free_pixmap(pixmap);
-                                        continue;
-                                    }
-                                    
-                                    let depth = match conn.get_geometry(composite_id) {
+                                    // Compare pixmap size with client window size (not frame window size)
+                                    // Get client window geometry directly
+                                    let client_geom = match conn.get_geometry(composite_id) {
                                         Ok(cookie) => match cookie.reply() {
-                                            Ok(geom) => geom.depth,
+                                            Ok(geom) => (geom.width, geom.height),
                                             Err(_) => {
                                                 let _ = conn.free_pixmap(pixmap);
                                                 continue;
@@ -623,25 +803,69 @@ impl CompositorInner {
                                             continue;
                                         }
                                     };
+                                    
+                                    if pixmap_geom.width != client_geom.0 || pixmap_geom.height != client_geom.1 {
+                                        debug!("Pixmap {} size mismatch for window {} (client {}): pixmap={}x{}, client={}x{}", 
+                                            pixmap, window_id, composite_id, pixmap_geom.width, pixmap_geom.height, client_geom.0, client_geom.1);
+                                        let _ = conn.free_pixmap(pixmap);
+                                        continue;
+                                    }
+                                    
+                                    let depth = match conn.get_geometry(composite_id) {
+                                        Ok(cookie) => match cookie.reply() {
+                                            Ok(geom) => geom.depth,
+                                            Err(e) => {
+                                                warn!("Failed to get geometry for window {}: {}", composite_id, e);
+                                                let _ = conn.free_pixmap(pixmap);
+                                                continue;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to get geometry cookie for window {}: {}", composite_id, e);
+                                            let _ = conn.free_pixmap(pixmap);
+                                            continue;
+                                        }
+                                    };
 
+                                    debug!("Created pixmap {} for window {} ({}x{}, depth {})", pixmap, window_id, pixmap_geom.width, pixmap_geom.height, depth);
                                     window.pixmap = Some(pixmap);
-                                    if let Err(_) = renderer.update_window_pixmap(gl_context, window.id, pixmap, depth) {
-                                        window.pixmap = None;
-                                        window.bind_failed = true;
+                                    match renderer.update_window_pixmap(gl_context, window.id, pixmap, depth) {
+                                        Ok(_) => {
+                                            debug!("Successfully created texture for window {}", window_id);
+                                            // Mark window as damaged so texture gets bound on next render
+                                            // This ensures initial content is displayed even if damage events are delayed
+                                            window.damaged = true;
+                                            window.frames_since_pixmap = 0; // Reset counter
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to create texture for window {} (pixmap {}, depth {}): {}", window_id, pixmap, depth, e);
+                                            window.pixmap = None;
+                                            window.bind_failed = true;
+                                            if !window.bind_failure_logged {
+                                                warn!("Window {} marked as bind_failed - will skip future pixmap creation attempts", window_id);
+                                                window.bind_failure_logged = true;
+                                            }
+                                            let _ = conn.free_pixmap(pixmap);
+                                        }
+                                    }
+                                }
+                                    Err(e) => {
+                                        warn!("Failed to get pixmap geometry for window {} (pixmap {}): {}", window_id, pixmap, e);
                                         let _ = conn.free_pixmap(pixmap);
                                     }
                                 }
-                                    Err(_) => {
-                                        let _ = conn.free_pixmap(pixmap);
-                                    }
-                                }
-                                Err(_) => {
+                                Err(e) => {
+                                    warn!("Failed to get pixmap geometry cookie for window {} (pixmap {}): {}", window_id, pixmap, e);
                                     let _ = conn.free_pixmap(pixmap);
                                 }
                             }
                         }
-                        Err(_) => {}
+                        Err(e) => {
+                            warn!("composite_name_window_pixmap error for window {}: {}", window_id, e);
+                        }
                     }
+                } else {
+                    warn!("Failed to generate pixmap ID for window {}", window_id);
                 }
             }
             
@@ -742,6 +966,7 @@ impl CompositorInner {
                             screen_height,
                             window.opacity,
                             window.damaged,
+                            window.frames_since_pixmap,
                         );
                     } else {
                         // Fallback rendering
@@ -769,6 +994,9 @@ impl CompositorInner {
                 }
             }
             
+            // Render panel (shell UI at bottom/top of screen)
+            shell.panel.render(renderer, screen_width, screen_height);
+            
             // Render logout dialog (if needed)
             shell.logout_dialog.render(renderer, screen_width, screen_height);
             
@@ -792,6 +1020,7 @@ impl CompositorInner {
                             screen_height,
                             window.opacity,
                             window.damaged,
+                            window.frames_since_pixmap,
                         );
                     } else {
                         // Fallback rendering for fullscreen
@@ -810,6 +1039,13 @@ impl CompositorInner {
             }
             
             if let Some(ref mut cursor) = self.cursor_manager {
+                // Load cursor image if not loaded yet (fallback if XfixesCursorNotify didn't fire)
+                if cursor.width == 0 || cursor.height == 0 || cursor.pixels.is_empty() {
+                    if let Err(e) = cursor.update_image(self.conn.as_ref()) {
+                        debug!("Failed to load cursor image during render: {}", e);
+                    }
+                }
+                
                 if cursor.visible && cursor.width > 0 && cursor.height > 0 && !cursor.pixels.is_empty() {
                     if cursor.dirty {
                         renderer.update_cursor_texture(
@@ -833,6 +1069,10 @@ impl CompositorInner {
                         screen_height,
                         cursor.texture_id,
                     );
+                    
+                    // Clear movement flag after rendering to prevent continuous rendering
+                    // This ensures we only render when cursor actually moves again
+                    cursor.clear_movement();
                 }
             }
             
@@ -851,14 +1091,20 @@ impl CompositorInner {
         let cursor_moved = self.cursor_manager.as_ref()
             .map(|c| c.has_moved())
             .unwrap_or(false);
-        window_damaged || cursor_moved
+        // Always render if there are no windows (to show panel and background)
+        // or if there's damage/cursor movement
+        window_damaged || cursor_moved || self.windows.is_empty()
     }
 
-    /// Clear all damage flags
+    /// Clear all damage flags and increment frame counters
     pub fn clear_damage(&mut self) {
         self.force_render = false;
         for window in self.windows.values_mut() {
             window.damaged = false;
+            // Increment frame counter if pixmap exists (for fallback binding)
+            if window.pixmap.is_some() {
+                window.frames_since_pixmap = window.frames_since_pixmap.saturating_add(1);
+            }
         }
         if let Some(ref mut cursor) = self.cursor_manager {
             cursor.prev_x = cursor.x;

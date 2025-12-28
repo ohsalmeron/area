@@ -71,6 +71,13 @@ impl CursorManager {
         self.x != self.prev_x || self.y != self.prev_y
     }
     
+    /// Clear movement flag after rendering (resets prev_x/prev_y to current position)
+    /// This prevents has_moved() from returning true continuously after a single movement
+    pub fn clear_movement(&mut self) {
+        self.prev_x = self.x;
+        self.prev_y = self.y;
+    }
+    
     /// Update cursor image when cursor changes (event-driven, only when needed)
     /// 
     /// This is called only on XfixesCursorNotify events, not every frame.

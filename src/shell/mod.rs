@@ -37,8 +37,11 @@ impl Shell {
         }
         
         // Check if click is on panel
-        if self.panel.handle_click(x, y, &mut self.logout_dialog)? {
-            return Ok(());
+        match self.panel.handle_click(x, y, &mut self.logout_dialog)? {
+            panel::PanelClickAction::LaunchApp | panel::PanelClickAction::Logout => {
+                return Ok(());
+            }
+            panel::PanelClickAction::None => {}
         }
         
         Ok(())

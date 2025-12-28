@@ -22,6 +22,7 @@ pub struct Atoms {
     pub net_wm_name: Atom,
     pub net_wm_desktop: Atom,
     pub net_wm_window_type: Atom,
+    pub _net_wm_window_type_desktop: Atom,
     pub _net_wm_window_type_dock: Atom,
     pub _net_wm_window_type_normal: Atom,
     pub _net_wm_window_type_dialog: Atom,
@@ -51,6 +52,9 @@ pub struct Atoms {
     pub net_frame_extents: Atom,
     pub _net_wm_bypass_compositor: Atom,
     pub _net_close_window: Atom,
+    pub _net_moveresize_window: Atom,
+    pub _net_wm_moveresize: Atom,
+    pub _net_wm_fullscreen_monitors: Atom,
     // Action atoms
     pub _net_wm_allowed_actions: Atom,
     pub _net_wm_action_move: Atom,
@@ -79,6 +83,8 @@ pub struct Atoms {
     pub _wm_normal_hints: Atom,
     pub _wm_size_hints: Atom,
     pub _utf8_string: Atom,
+    // MOTIF WM Hints (for decoration control)
+    pub _motif_wm_hints: Atom,
 }
 
 impl Atoms {
@@ -98,6 +104,7 @@ impl Atoms {
             net_wm_name: intern("_NET_WM_NAME")?,
             net_wm_desktop: intern("_NET_WM_DESKTOP")?,
             net_wm_window_type: intern("_NET_WM_WINDOW_TYPE")?,
+            _net_wm_window_type_desktop: intern("_NET_WM_WINDOW_TYPE_DESKTOP")?,
             _net_wm_window_type_dock: intern("_NET_WM_WINDOW_TYPE_DOCK")?,
             _net_wm_window_type_normal: intern("_NET_WM_WINDOW_TYPE_NORMAL")?,
             _net_wm_window_type_dialog: intern("_NET_WM_WINDOW_TYPE_DIALOG")?,
@@ -127,6 +134,9 @@ impl Atoms {
             net_frame_extents: intern("_NET_FRAME_EXTENTS")?,
             _net_wm_bypass_compositor: intern("_NET_WM_BYPASS_COMPOSITOR")?,
             _net_close_window: intern("_NET_CLOSE_WINDOW")?,
+            _net_moveresize_window: intern("_NET_MOVERESIZE_WINDOW")?,
+            _net_wm_moveresize: intern("_NET_WM_MOVERESIZE")?,
+            _net_wm_fullscreen_monitors: intern("_NET_WM_FULLSCREEN_MONITORS")?,
             // Action atoms
             _net_wm_allowed_actions: intern("_NET_WM_ALLOWED_ACTIONS")?,
             _net_wm_action_move: intern("_NET_WM_ACTION_MOVE")?,
@@ -155,6 +165,7 @@ impl Atoms {
             _wm_normal_hints: intern("WM_NORMAL_HINTS")?,
             _wm_size_hints: intern("WM_SIZE_HINTS")?,
             _utf8_string: intern("UTF8_STRING")?,
+            _motif_wm_hints: intern("_MOTIF_WM_HINTS")?,
         })
     }
 
@@ -439,5 +450,81 @@ impl Atoms {
             }
         }
         Ok(false)
+    }
+}
+
+/// MOTIF WM Hints structure
+/// Based on MWM (Motif Window Manager) hints specification
+#[derive(Debug, Clone, Copy)]
+pub struct MotifWmHints {
+    pub flags: u32,        // MWM_HINTS_* flags
+    pub functions: u32,    // MWM_FUNC_* bits
+    pub decorations: u32,  // MWM_DECOR_* bits
+}
+
+impl Atoms {
+    // MOTIF WM Hints constants
+    pub const MWM_HINTS_DECORATIONS: u32 = 1 << 1;
+    pub const MWM_HINTS_FUNCTIONS: u32 = 1 << 0;
+    pub const MWM_DECOR_ALL: u32 = 1 << 0;
+    pub const MWM_DECOR_BORDER: u32 = 1 << 1;
+    pub const MWM_DECOR_TITLE: u32 = 1 << 3;
+    
+    /// Get MOTIF_WM_HINTS property for a window
+    /// Returns Some(MotifWmHints) if the property exists and is valid, None otherwise
+    pub fn get_motif_hints<C: Connection>(
+        &self,
+        conn: &C,
+        window: Window,
+    ) -> Result<Option<MotifWmHints>> {
+        // MOTIF_WM_HINTS is a property of type _MOTIF_WM_HINTS containing 5 32-bit values
+        // We only need the first 3: flags, functions, decorations
+        if let Ok(reply) = conn.get_property(
+            false,
+            window,
+            self._motif_wm_hints,
+            self._motif_wm_hints, // Type is the same as the atom
+            0,
+            5, // Read up to 5 values (we only need 3)
+        )?.reply() {
+            if let Some(value32) = reply.value32() {
+                let values: Vec<u32> = value32.take(3).collect();
+                if values.len() >= 3 {
+                    return Ok(Some(MotifWmHints {
+                        flags: values[0],
+                        functions: values[1],
+                        decorations: values[2],
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+    
+    /// Check if MOTIF hints indicate the window should have decorations
+    /// Returns true if decorations should be shown, false if they should be hidden
+    /// Returns None if MOTIF hints are not present or don't specify decoration preference
+    pub fn should_decorate_from_motif_hints<C: Connection>(
+        &self,
+        conn: &C,
+        window: Window,
+    ) -> Result<Option<bool>> {
+        if let Some(hints) = self.get_motif_hints(conn, window)? {
+            // Check if decorations flag is set
+            if (hints.flags & Self::MWM_HINTS_DECORATIONS) != 0 {
+                // If decorations field is 0, no decorations
+                if hints.decorations == 0 {
+                    return Ok(Some(false));
+                }
+                // If MWM_DECOR_ALL or MWM_DECOR_TITLE is set, show decorations
+                if (hints.decorations & (Self::MWM_DECOR_ALL | Self::MWM_DECOR_TITLE)) != 0 {
+                    return Ok(Some(true));
+                }
+                // Otherwise, no decorations
+                return Ok(Some(false));
+            }
+        }
+        // MOTIF hints not present or don't specify decoration preference
+        Ok(None)
     }
 }

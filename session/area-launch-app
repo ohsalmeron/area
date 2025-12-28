@@ -1,0 +1,133 @@
+#!/bin/bash
+# Area Application Launcher Helper
+# Properly launches applications using desktop files or direct commands
+#
+# Usage:
+#   area-launch-app firefox          # Launch by desktop file name
+#   area-launch-app /path/to/app.desktop  # Launch by full path
+#   area-launch-app --command chromium   # Launch by command name
+#   area-launch-app --exec "chromium --new-window"  # Launch with custom command
+
+set -e
+
+# Get DISPLAY and XAUTHORITY from environment or defaults
+DISPLAY="${DISPLAY:-:0}"
+XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
+
+# Function to find desktop file
+find_desktop_file() {
+    local app_name="$1"
+    
+    # Try common desktop file locations
+    local locations=(
+        "$HOME/.local/share/applications/${app_name}.desktop"
+        "/usr/share/applications/${app_name}.desktop"
+        "/usr/local/share/applications/${app_name}.desktop"
+    )
+    
+    for loc in "${locations[@]}"; do
+        if [ -f "$loc" ]; then
+            echo "$loc"
+            return 0
+        fi
+    done
+    
+    # Try searching by name in desktop files
+    for dir in "$HOME/.local/share/applications" "/usr/share/applications" "/usr/local/share/applications"; do
+        if [ -d "$dir" ]; then
+            local found=$(grep -l "^Name=.*${app_name}" "$dir"/*.desktop 2>/dev/null | head -1)
+            if [ -n "$found" ]; then
+                echo "$found"
+                return 0
+            fi
+        fi
+    done
+    
+    return 1
+}
+
+# Function to launch from desktop file
+launch_from_desktop() {
+    local desktop_file="$1"
+    
+    if [ ! -f "$desktop_file" ]; then
+        echo "Error: Desktop file not found: $desktop_file" >&2
+        return 1
+    fi
+    
+    # Check if desktop file is executable (some are meant to be executed directly)
+    if [ -x "$desktop_file" ]; then
+        DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" "$desktop_file" "$@" &
+        return $?
+    fi
+    
+    # Use xdg-open (handles everything properly)
+    if command -v xdg-open >/dev/null 2>&1; then
+        DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" xdg-open "$desktop_file" &
+        return $?
+    fi
+    
+    # Fallback: Use gtk-launch (needs app-id without .desktop extension)
+    if command -v gtk-launch >/dev/null 2>&1; then
+        local app_id=$(basename "$desktop_file" .desktop)
+        DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" gtk-launch "$app_id" "$@" &
+        return $?
+    fi
+    
+    # Last resort: Parse Exec= from desktop file
+    local exec_line=$(grep "^Exec=" "$desktop_file" | head -1 | cut -d'=' -f2-)
+    if [ -n "$exec_line" ]; then
+        # Remove field codes like %u, %f, etc. (basic handling)
+        exec_line=$(echo "$exec_line" | sed 's/%[a-zA-Z]//g')
+        # Extract command (first word)
+        local cmd=$(echo "$exec_line" | awk '{print $1}')
+        if [ -n "$cmd" ] && command -v "$cmd" >/dev/null 2>&1; then
+            DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" $exec_line "$@" &
+            return $?
+        fi
+    fi
+    
+    echo "Error: Could not launch from desktop file: $desktop_file" >&2
+    return 1
+}
+
+# Main logic
+if [ "$1" = "--command" ]; then
+    # Launch by command name directly
+    shift
+    if [ $# -eq 0 ]; then
+        echo "Error: No command specified" >&2
+        exit 1
+    fi
+    DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" "$@" &
+    exit $?
+elif [ "$1" = "--exec" ]; then
+    # Launch with custom command
+    shift
+    if [ $# -eq 0 ]; then
+        echo "Error: No command specified" >&2
+        exit 1
+    fi
+    DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" $@ &
+    exit $?
+elif [ -f "$1" ] && [[ "$1" == *.desktop ]]; then
+    # Full path to desktop file provided
+    launch_from_desktop "$1" "${@:2}"
+    exit $?
+else
+    # Try to find desktop file by name
+    if desktop_file=$(find_desktop_file "$1"); then
+        launch_from_desktop "$desktop_file" "${@:2}"
+        exit $?
+    else
+        # Fallback: try as command
+        if command -v "$1" >/dev/null 2>&1; then
+            DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" "$@" &
+            exit $?
+        else
+            echo "Error: Could not find application '$1'" >&2
+            echo "  Tried: desktop file and command in PATH" >&2
+            exit 1
+        fi
+    fi
+fi

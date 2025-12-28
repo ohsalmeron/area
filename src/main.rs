@@ -24,6 +24,25 @@ use x11rb::protocol::Event;
 use wm::client::Client;
 use compositor::c_window::CWindow;
 
+// #region agent log
+fn debug_log(location: &str, message: &str, data: serde_json::Value, hypothesis_id: &str) {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    let log_entry = serde_json::json!({
+        "sessionId": "debug-session",
+        "runId": "run1",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+    });
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("/home/bizkit/GitHub/area/.cursor/debug.log") {
+        let _ = writeln!(file, "{}", log_entry);
+    }
+}
+// #endregion
+
 /// Main application state
 struct AreaApp {
     /// X11 connection (Arc for sharing across threads)
@@ -74,6 +93,10 @@ struct AreaApp {
     
     /// Last titlebar click for double-click detection
     last_titlebar_click: Option<(u32, u32, i16, i16)>, // (window_id, time, x, y)
+    
+    /// DISPLAY value to use when spawning child processes
+    /// This ensures child processes connect to the same X server as Area
+    display: String,
 }
 
 impl AreaApp {
@@ -85,6 +108,11 @@ impl AreaApp {
         // Connect to X11
         let (conn, screen_num) = x11rb::connect(None)
             .context("Failed to connect to X server")?;
+        
+        // Store DISPLAY value for spawning child processes
+        // This ensures child processes connect to the same X server as Area
+        let display_value = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into());
+        info!("Using DISPLAY={} for child processes", display_value);
         
         let conn = Arc::new(conn);
         let screen = &conn.as_ref().setup().roots[screen_num];
@@ -179,6 +207,7 @@ impl AreaApp {
             reparenting_windows: HashSet::new(),
             frame_windows: HashSet::new(),
             last_titlebar_click: None,
+            display: display_value.clone(),
         };
         
         // Show startup notification
@@ -245,8 +274,25 @@ impl AreaApp {
         Ok(())
     }
     
+    /// Emit D-Bus ready signal
+    async fn emit_ready_signal(&self) {
+        // Try to emit via D-Bus if available
+        // For now, we'll use a simpler approach: create a ready file
+        let ready_file = std::env::var("XDG_RUNTIME_DIR")
+            .unwrap_or_else(|_| "/tmp".to_string())
+            + "/area-ready";
+        if let Err(e) = std::fs::write(&ready_file, "ready") {
+            warn!("Failed to create ready file: {}", e);
+        } else {
+            info!("Created ready signal file: {}", ready_file);
+        }
+    }
+    
     /// Main event loop (LeftWM pattern with event buffering)
     async fn run(mut self) -> Result<()> {
+        // Emit ready signal before starting event loop
+        self.emit_ready_signal().await;
+        
         info!("Starting main event loop");
         info!("Overlay window ID: {}", self.compositor.overlay_window);
         
@@ -505,7 +551,7 @@ impl AreaApp {
                         
                         // If window requests fullscreen size and has bypass_compositor, force fullscreen
                         // This handles games that resize to fullscreen without setting EWMH state first
-                        if is_screen_size && !client.state.fullscreen {
+                        if is_screen_size && !client.is_fullscreen() {
                             if let Ok(bypass) = self.wm.atoms.check_bypass_compositor(&self.conn, cid) {
                                 if bypass {
                                     debug!("ConfigureRequest: Window {} requests fullscreen size with bypass_compositor, setting fullscreen", cid);
@@ -666,9 +712,9 @@ impl AreaApp {
                         if first_atom == net_wm_state_fullscreen || second_atom == net_wm_state_fullscreen {
                             debug!("_NET_WM_STATE FULLSCREEN requested for window {} (action={}, current={})", 
                                    client_id, action, 
-                                   self.wm_windows.get(&client_id).map(|c| c.state.fullscreen).unwrap_or(false));
+                                   self.wm_windows.get(&client_id).map(|c| c.is_fullscreen()).unwrap_or(false));
                             if let Some(client) = self.wm_windows.get(&client_id) {
-                                let current = client.state.fullscreen;
+                                let current = client.is_fullscreen();
                                 let should_change = should_apply(current, action);
                                 
                                 if should_change {
@@ -680,11 +726,13 @@ impl AreaApp {
                                             debug!("Successfully set fullscreen={} for window {}", !current, client_id);
                                             state_changed = true;
                                             // Coordinate with compositor: unredirect/redirect based on fullscreen state
-                                            // Use client window directly for fullscreen (frame is hidden)
+                                                // Use client window directly for fullscreen (frame is hidden)
                                             if !current {
                                                 // Entering fullscreen
-                                                // If window has a frame, add client window to compositor (frame is unmapped)
-                                                if client.frame.is_some() {
+                                                // If window has a frame, remove frame from compositor and add client window
+                                                if let Some(frame) = &client.frame {
+                                                    // Remove frame window from compositor (frame is unmapped)
+                                                    self.compositor.remove_window(frame.frame);
                                                     // Add client window to compositor for fullscreen rendering
                                                     let client_geom = client.geometry;
                                                     let c_window = crate::compositor::c_window::CWindow::new(
@@ -705,8 +753,22 @@ impl AreaApp {
                                                 if self.config.compositor.unredirect_fullscreen {
                                                     self.compositor.redirect_window(client_id);
                                                 }
-                                                // Remove client window from compositor (frame is mapped back, compositor will track frame again)
+                                                // Remove client window from compositor
                                                 self.compositor.remove_window(client_id);
+                                                // Re-add frame window to compositor (frame is mapped back in set_fullscreen)
+                                                if let Some(frame) = &client.frame {
+                                                    // Frame window needs to be re-added to compositor
+                                                    // Use the same logic as initial window mapping
+                                                    let frame_geom = client.frame_geometry();
+                                                    let c_window = crate::compositor::c_window::CWindow::new(
+                                                        frame.frame,  // composite_id = frame window
+                                                        client_id,    // client_id = client window
+                                                        frame_geom,
+                                                        2,  // border_width = 2
+                                                        true,  // viewable = true (frame is mapped)
+                                                    );
+                                                    self.compositor.add_window(c_window);
+                                                }
                                             }
                                         }
                                     }
@@ -719,7 +781,7 @@ impl AreaApp {
                                              (first_atom == net_wm_state_maximized_horz || second_atom == net_wm_state_maximized_horz);
                         if handle_maximize {
                             if let Some(client) = self.wm_windows.get(&client_id) {
-                                let current = client.state.maximized;
+                                let current = client.is_maximized();
                                 let should_change = should_apply(current, action);
                                 
                                 if should_change {
@@ -745,7 +807,7 @@ impl AreaApp {
                         // Handle HIDDEN (minimize)
                         if first_atom == net_wm_state_hidden || second_atom == net_wm_state_hidden {
                             if let Some(client) = self.wm_windows.get(&client_id) {
-                                let current = !client.mapped;
+                                let current = !client.mapped();
                                 let should_change = should_apply(current, action);
                                 
                                 if should_change {
@@ -761,8 +823,8 @@ impl AreaApp {
                                                 } else {
                                                     self.conn.as_ref().map_window(client_id)?;
                                                 }
-                                                client.mapped = true;
-                                                client.state.minimized = false;
+                                                client.set_mapped(true);
+                                                client.flags.remove(crate::wm::client_flags::ClientFlags::ICONIFIED);
                                                 self.conn.as_ref().flush()?;
                                                 state_changed = true;
                                             }
@@ -782,13 +844,13 @@ impl AreaApp {
                         // Handle ABOVE (mutually exclusive with BELOW)
                         if first_atom == net_wm_state_above || second_atom == net_wm_state_above {
                             if let Some(client) = self.wm_windows.get_mut(&client_id) {
-                                let current = client.state.above;
+                                let current = client.flags.contains(crate::wm::client_flags::ClientFlags::ABOVE);
                                 let should_change = should_apply(current, action);
                                 
                                 if should_change {
                                     // Remove BELOW if setting ABOVE
-                                    if !current && client.state.below {
-                                        client.state.below = false;
+                                    if !current && client.flags.contains(crate::wm::client_flags::ClientFlags::BELOW) {
+                                        client.flags.remove(crate::wm::client_flags::ClientFlags::BELOW);
                                         self.wm.atoms.set_window_state(
                                             &self.conn,
                                             client_id,
@@ -797,7 +859,11 @@ impl AreaApp {
                                         )?;
                                     }
                                     
-                                    client.state.above = !current;
+                                    if !current {
+                                        client.flags.insert(crate::wm::client_flags::ClientFlags::ABOVE);
+                                    } else {
+                                        client.flags.remove(crate::wm::client_flags::ClientFlags::ABOVE);
+                                    }
                                     let (add_atoms, remove_atoms) = if !current {
                                         (&[net_wm_state_above] as &[u32], &[] as &[u32])
                                     } else {
@@ -818,13 +884,13 @@ impl AreaApp {
                         // Handle BELOW (mutually exclusive with ABOVE)
                         if first_atom == net_wm_state_below || second_atom == net_wm_state_below {
                             if let Some(client) = self.wm_windows.get_mut(&client_id) {
-                                let current = client.state.below;
+                                let current = client.flags.contains(crate::wm::client_flags::ClientFlags::BELOW);
                                 let should_change = should_apply(current, action);
                                 
                                 if should_change {
                                     // Remove ABOVE if setting BELOW
-                                    if !current && client.state.above {
-                                        client.state.above = false;
+                                    if !current && client.flags.contains(crate::wm::client_flags::ClientFlags::ABOVE) {
+                                        client.flags.remove(crate::wm::client_flags::ClientFlags::ABOVE);
                                         self.wm.atoms.set_window_state(
                                             &self.conn,
                                             client_id,
@@ -833,7 +899,11 @@ impl AreaApp {
                                         )?;
                                     }
                                     
-                                    client.state.below = !current;
+                                    if !current {
+                                        client.flags.insert(crate::wm::client_flags::ClientFlags::BELOW);
+                                    } else {
+                                        client.flags.remove(crate::wm::client_flags::ClientFlags::BELOW);
+                                    }
                                     let (add_atoms, remove_atoms) = if !current {
                                         (&[net_wm_state_below] as &[u32], &[] as &[u32])
                                     } else {
@@ -993,7 +1063,7 @@ impl AreaApp {
                         debug!("Ignoring MapNotify for window {} (caused by reparenting)", e.window);
                         // Window is already managed, just mark it as mapped
                         if let Some(client) = self.wm_windows.get_mut(&e.window) {
-                            client.mapped = true;
+                            client.set_mapped(true);
                         }
                         return Ok(());
                     }
@@ -1007,7 +1077,7 @@ impl AreaApp {
                     } else {
                         // Window is already managed, just mark it as mapped
                         if let Some(client) = self.wm_windows.get_mut(&e.window) {
-                            client.mapped = true;
+                            client.set_mapped(true);
                         }
                     }
                 }
@@ -1016,8 +1086,40 @@ impl AreaApp {
             Event::ButtonPress(e) => {
                 // Check if click is on panel (using root coordinates)
                 if self.shell.panel.contains_point(e.root_x, e.root_y) {
-                    if let Err(err) = self.shell.panel.handle_click(e.root_x, e.root_y, &mut self.shell.logout_dialog) {
-                        warn!("Error handling panel click: {}", err);
+                    match self.shell.panel.handle_click(e.root_x, e.root_y, &mut self.shell.logout_dialog) {
+                        Ok(action) => {
+                            match action {
+                                crate::shell::panel::PanelClickAction::LaunchApp => {
+                                    // Launch navigator or terminal
+                                    info!("Launcher button clicked, launching application launcher");
+                                    let launcher_cmd = self.config.keybindings.launcher_command.clone();
+                                    let mut cmd = std::process::Command::new(&launcher_cmd);
+                                    cmd.env("DISPLAY", &self.display);
+                                    if let Ok(xauth) = std::env::var("XAUTHORITY") {
+                                        cmd.env("XAUTHORITY", xauth);
+                                    }
+                                    if let Err(err) = cmd.spawn() {
+                                        warn!("Failed to launch {}: {}", launcher_cmd, err);
+                                        // Fallback: try launching terminal directly
+                                        let mut term_cmd = std::process::Command::new("xfce4-terminal");
+                                        term_cmd.env("DISPLAY", &self.display);
+                                        if let Ok(xauth) = std::env::var("XAUTHORITY") {
+                                            term_cmd.env("XAUTHORITY", xauth);
+                                        }
+                                        if let Err(err) = term_cmd.spawn() {
+                                            warn!("Failed to launch fallback terminal: {}", err);
+                                        }
+                                    }
+                                }
+                                crate::shell::panel::PanelClickAction::Logout => {
+                                    // Already handled by handle_click (shows logout dialog)
+                                }
+                                crate::shell::panel::PanelClickAction::None => {}
+                            }
+                        }
+                        Err(err) => {
+                            warn!("Error handling panel click: {}", err);
+                        }
                     }
                     return Ok(());
                 }
@@ -1217,7 +1319,7 @@ impl AreaApp {
                                           && e.x <= 20 && e.y <= 20;
                         
                         // Only auto-detect if not already fullscreen
-                        if is_screen_size && !client.state.fullscreen {
+                        if is_screen_size && !client.is_fullscreen() {
                             // Check if window has bypass_compositor (indicates game wants fullscreen)
                             let should_fullscreen = if let Ok(bypass) = self.wm.atoms.check_bypass_compositor(&self.conn, cid) {
                                 bypass // If bypass is set, definitely fullscreen
@@ -1230,8 +1332,10 @@ impl AreaApp {
                                 if let Err(err) = self.wm.set_fullscreen(&self.conn, client, true) {
                                     warn!("Failed to set fullscreen for window {} (geometry-based detection): {}", cid, err);
                                 } else {
-                                    // If window has a frame, add client window to compositor (frame is unmapped)
-                                    if client.frame.is_some() {
+                                    // If window has a frame, remove frame from compositor and add client window
+                                    if let Some(frame) = &client.frame {
+                                        // Remove frame window from compositor (frame is unmapped)
+                                        self.compositor.remove_window(frame.frame);
                                         // Add client window to compositor for fullscreen rendering
                                         let client_geom = client.geometry;
                                         let c_window = crate::compositor::c_window::CWindow::new(
@@ -1250,7 +1354,7 @@ impl AreaApp {
                                     }
                                 }
                             }
-                        } else if !is_screen_size && client.state.fullscreen {
+                        } else if !is_screen_size && client.is_fullscreen() {
                             // Window is no longer screen size but is marked fullscreen - exit fullscreen
                             // (This handles cases where games resize out of fullscreen before clearing EWMH state)
                             debug!("Geometry-based fullscreen detection: window {} no longer screen size, exiting fullscreen", cid);
@@ -1261,8 +1365,20 @@ impl AreaApp {
                                 if self.config.compositor.unredirect_fullscreen {
                                     self.compositor.redirect_window(cid);
                                 }
-                                // Remove client window from compositor (frame is mapped back, compositor will track frame again)
+                                // Remove client window from compositor
                                 self.compositor.remove_window(cid);
+                                // Re-add frame window to compositor (frame is mapped back in set_fullscreen)
+                                if let Some(frame) = &client.frame {
+                                    let frame_geom = client.frame_geometry();
+                                    let c_window = crate::compositor::c_window::CWindow::new(
+                                        frame.frame,  // composite_id = frame window
+                                        cid,          // client_id = client window
+                                        frame_geom,
+                                        2,  // border_width = 2
+                                        true,  // viewable = true (frame is mapped)
+                                    );
+                                    self.compositor.add_window(c_window);
+                                }
                             }
                         }
                     }
@@ -1290,9 +1406,13 @@ impl AreaApp {
                 if (u16::from(e.state) & mod4_bit) != 0 || launcher_keycodes.contains(&e.detail) {
                     // Launch launcher command from config
                     info!("Launcher key pressed (keycode {}), launching {}", e.detail, self.config.keybindings.launcher_command);
-                    let _ = std::process::Command::new(&self.config.keybindings.launcher_command)
-                        .env("DISPLAY", format!("{}", std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into())))
-                        .spawn();
+                    let mut cmd = std::process::Command::new(&self.config.keybindings.launcher_command);
+                    cmd.env("DISPLAY", &self.display);
+                    // Preserve XAUTHORITY if set
+                    if let Ok(xauth) = std::env::var("XAUTHORITY") {
+                        cmd.env("XAUTHORITY", xauth);
+                    }
+                    let _ = cmd.spawn();
                 }
             }
             
@@ -1365,6 +1485,78 @@ impl AreaApp {
                 }
             }
             
+            Event::FocusIn(e) => {
+                // Handle focus changes with detailed logging
+                let window_id = e.event;
+                let detail = format!("{:?}", e.detail);
+                let mode = format!("{:?}", e.mode);
+                
+                // Find which client window this belongs to
+                let client_id = self.wm.find_client_from_window(&self.wm_windows, window_id);
+                
+                if let Some(cid) = client_id {
+                    if let Some(client) = self.wm_windows.get(&cid) {
+                        info!("🎯 FocusIn: window={} (client={}), detail={}, mode={}, title='{}', focused={}", 
+                            window_id, cid, detail, mode, client.title(), client.focused());
+                        
+                        // Update focus state if needed
+                        if !client.focused() {
+                            debug!("Window {} gained focus but wasn't marked as focused, updating state", cid);
+                            if let Err(err) = self.wm.set_focus(&self.conn, &mut self.wm_windows, cid) {
+                                warn!("Failed to set focus for window {}: {}", cid, err);
+                            }
+                        }
+                    } else {
+                        info!("🎯 FocusIn: window={} (client={}), detail={}, mode={}, but client not found in wm_windows", 
+                            window_id, cid, detail, mode);
+                    }
+                } else {
+                    // Could be root window or unmanaged window
+                    if window_id == self.root {
+                        info!("🎯 FocusIn: root window, detail={}, mode={}", detail, mode);
+                    } else {
+                        info!("🎯 FocusIn: window={}, detail={}, mode={}, not a managed client", 
+                            window_id, detail, mode);
+                    }
+                }
+            }
+            
+            Event::FocusOut(e) => {
+                // Handle focus loss with detailed logging
+                let window_id = e.event;
+                let detail = format!("{:?}", e.detail);
+                let mode = format!("{:?}", e.mode);
+                
+                // Find which client window this belongs to
+                let client_id = self.wm.find_client_from_window(&self.wm_windows, window_id);
+                
+                if let Some(cid) = client_id {
+                    if let Some(client) = self.wm_windows.get(&cid) {
+                        info!("🎯 FocusOut: window={} (client={}), detail={}, mode={}, title='{}', was_focused={}", 
+                            window_id, cid, detail, mode, client.title(), client.focused());
+                        
+                        // Clear focus if this window had it
+                        if client.focused() {
+                            debug!("Window {} lost focus, clearing focus state", cid);
+                            if let Some(client) = self.wm_windows.get_mut(&cid) {
+                                client.set_focused(false);
+                            }
+                        }
+                    } else {
+                        info!("🎯 FocusOut: window={} (client={}), detail={}, mode={}, but client not found in wm_windows", 
+                            window_id, cid, detail, mode);
+                    }
+                } else {
+                    // Could be root window or unmanaged window
+                    if window_id == self.root {
+                        info!("🎯 FocusOut: root window, detail={}, mode={}", detail, mode);
+                    } else {
+                        info!("🎯 FocusOut: window={}, detail={}, mode={}, not a managed client", 
+                            window_id, detail, mode);
+                    }
+                }
+            }
+            
             _ => {
                 // Log unknown events at debug level
                 debug!("Unhandled event: {:?}", event);
@@ -1382,8 +1574,8 @@ impl AreaApp {
             // Map the window if it's not already mapped
             if let Some(client) = self.wm_windows.get_mut(&window_id) {
                 // If window was minimized, restore it
-                if client.state.minimized {
-                    client.state.minimized = false;
+                if client.is_minimized() {
+                    client.flags.remove(crate::wm::client_flags::ClientFlags::ICONIFIED);
                     if let Some(frame) = &client.frame {
                         self.conn.map_window(frame.frame)?;
                     } else {
@@ -1392,7 +1584,7 @@ impl AreaApp {
                 } else {
                     self.conn.as_ref().map_window(window_id)?;
                 }
-                client.mapped = true;
+                client.set_mapped(true);
             }
             self.conn.as_ref().flush()?;
             return Ok(());
@@ -1436,7 +1628,18 @@ impl AreaApp {
         // This will restore the window's geometry and decorations
         // Note: This will trigger reparent_window, which causes UnmapNotify -> MapNotify
         // We ignore those events because the window is in reparenting_windows
-        self.wm.manage_window(&self.conn, &mut client)?;
+        let manage_result = self.wm.manage_window(&self.conn, &mut client);
+        
+        // #region agent log
+        debug_log("main.rs:1613", "manage_window result", serde_json::json!({
+            "window_id": window_id,
+            "success": manage_result.is_ok(),
+            "has_frame": client.frame.is_some(),
+            "frame_id": client.frame.as_ref().map(|f| f.frame)
+        }), "A");
+        // #endregion
+        
+        manage_result?;
         
         // Register frame windows to prevent recursive management
         if let Some(frame) = &client.frame {
@@ -1445,6 +1648,14 @@ impl AreaApp {
             self.frame_windows.insert(frame.close_button);
             self.frame_windows.insert(frame.maximize_button);
             self.frame_windows.insert(frame.minimize_button);
+            
+            // #region agent log
+            debug_log("main.rs:1628", "Frame windows registered", serde_json::json!({
+                "window_id": window_id,
+                "frame": frame.frame,
+                "titlebar": frame.titlebar
+            }), "A");
+            // #endregion
         }
         
         // Map the window so it becomes visible
@@ -1456,12 +1667,12 @@ impl AreaApp {
         // Map the client window (restore it if it was mapped before)
         if was_mapped {
             self.conn.map_window(window_id)?;
-            client.mapped = true;
+            client.set_mapped(true);
             debug!("Restored and mapped window {} (was previously mapped)", window_id);
         } else {
             // Window wasn't mapped, but map it anyway so user can see it
             self.conn.map_window(window_id)?;
-            client.mapped = true;
+            client.set_mapped(true);
             debug!("Mapped new window {}", window_id);
         }
         self.conn.as_ref().flush()?;
@@ -1483,7 +1694,16 @@ impl AreaApp {
         
         // Let compositor register the window (creates texture, damage tracking)
         // Determine composite target (FRAME or CLIENT)
-        let composite_id = client.frame.as_ref().map(|f| f.frame).unwrap_or(client.id);
+        let composite_id = client.frame.as_ref().map(|f| f.frame).unwrap_or(client.window);
+        
+        // #region agent log
+        debug_log("main.rs:1641", "Adding window to compositor", serde_json::json!({
+            "client_id": window_id,
+            "composite_id": composite_id,
+            "has_frame": client.frame.is_some(),
+            "frame_id": client.frame.as_ref().map(|f| f.frame)
+        }), "D");
+        // #endregion
         
         // Get actual geometry, border width and viewable state from X11
         // We use *actual* X11 geometry because pixmap size matches the real window size
@@ -1514,13 +1734,21 @@ impl AreaApp {
         // Use actual X11 geometry for the compositor window
         let c_window = CWindow::new(
             composite_id, 
-            client.id, 
+            client.window, 
             geometry, 
             border_width, 
             viewable
         );
 
         self.compositor.add_window(c_window);
+        
+        // #region agent log
+        debug_log("main.rs:1678", "Window added to compositor", serde_json::json!({
+            "composite_id": composite_id,
+            "geometry": {"x": geometry.x, "y": geometry.y, "width": geometry.width, "height": geometry.height},
+            "viewable": viewable
+        }), "D");
+        // #endregion
         
         // Check for _NET_WM_BYPASS_COMPOSITOR hint before storing window
         // Also check if window should be fullscreen (games often set bypass + fullscreen)
@@ -1532,7 +1760,7 @@ impl AreaApp {
             self.compositor.unredirect_window(composite_id);
             
             // Check EWMH state first
-            if !client.state.fullscreen {
+            if !client.is_fullscreen() {
                 if let Ok(reply) = self.conn.as_ref().get_property(
                     false,
                     window_id,
@@ -1550,7 +1778,7 @@ impl AreaApp {
             }
             
             // Also check geometry - if window is screen-sized, it's likely fullscreen
-            if !needs_fullscreen && !client.state.fullscreen {
+            if !needs_fullscreen && !client.is_fullscreen() {
                 let screen_width = self.screen_width as u32;
                 let screen_height = self.screen_height as u32;
                 if client.geometry.width >= screen_width.saturating_sub(20)

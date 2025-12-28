@@ -25,7 +25,7 @@ cd "$PROJECT_ROOT"
 # Configuration defaults
 # -----------------------------------------------------------------------------
 DISPLAY_NUM=":99"
-SCREEN_SIZE="1280x720"
+SCREEN_SIZE="1920x1080"
 WATCH_MODE=false
 DEBUG_MODE=false
 KEEP_XEPHYR=false
