@@ -182,20 +182,34 @@ impl CycleManager {
             }
             CycleMode::CurrentWorkspace => {
                 // Only windows on current workspace
-                // TODO: Filter by workspace
+                // Get current workspace from workspace manager (if available)
+                // For now, assume workspace 0 is current
+                let current_workspace = 0; // TODO: Get from workspace manager
                 for (window, client) in clients.iter() {
-                    if client.mapped() {
+                    if client.mapped() && (client.win_workspace == current_workspace || client.win_workspace == 0xFFFFFFFF) {
+                        // Include windows on current workspace or sticky windows
                         self.cycle_list.push(*window);
                     }
                 }
             }
             CycleMode::Group => {
-                // Group by application
-                // TODO: Group windows by application
+                // Group windows by application (using WM_CLASS or client_leader)
+                use std::collections::HashMap;
+                let mut groups: HashMap<String, Vec<u32>> = HashMap::new();
+                
                 for (window, client) in clients.iter() {
                     if client.mapped() {
-                        self.cycle_list.push(*window);
+                        // Use res_class from class_hint as group key
+                        let group_key = client.class_hint.as_ref()
+                            .map(|h| h.res_class.clone())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        groups.entry(group_key).or_insert_with(Vec::new).push(*window);
                     }
+                }
+                
+                // Add windows from each group (most recent first within group)
+                for (_group, windows) in groups.iter() {
+                    self.cycle_list.extend(windows.iter().copied());
                 }
             }
         }
@@ -213,6 +227,7 @@ impl Default for CycleManager {
         Self::new()
     }
 }
+
 
 
 

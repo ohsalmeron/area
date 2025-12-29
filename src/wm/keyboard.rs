@@ -5,13 +5,12 @@
 
 use anyhow::Result;
 use std::collections::HashMap;
-use tracing::{debug, info, warn};
+use tracing::debug;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
-use crate::wm::display::DisplayInfo;
 use crate::wm::screen::ScreenInfo;
 
 /// Keyboard shortcut action
@@ -41,6 +40,8 @@ pub enum KeyboardAction {
     ShowWindowMenu,
     /// Cycle windows
     CycleWindows,
+    /// Cycle windows (previous)
+    CycleWindowsPrev,
     /// Tile window left
     TileLeft,
     /// Tile window right
@@ -78,7 +79,7 @@ pub struct ModifierMap {
 
 impl KeyboardManager {
     /// Create a new keyboard manager
-    pub fn new(conn: &RustConnection) -> Result<Self> {
+    pub fn new(conn: &RustConnection, screen_info: &ScreenInfo) -> Result<Self> {
         // Get modifier mapping
         let mod_map = Self::get_modifier_map_internal(conn)?;
         
@@ -88,7 +89,7 @@ impl KeyboardManager {
         };
         
         // Set up default bindings
-        manager.setup_default_bindings()?;
+        manager.setup_default_bindings(conn, screen_info)?;
         
         Ok(manager)
     }
@@ -112,10 +113,144 @@ impl KeyboardManager {
     }
     
     /// Set up default key bindings
-    fn setup_default_bindings(&mut self) -> Result<()> {
+    pub fn setup_default_bindings(
+        &mut self,
+        conn: &RustConnection,
+        screen_info: &ScreenInfo,
+    ) -> Result<()> {
         // Default xfwm4 bindings would go here
-        // For now, just set up a few common ones
         debug!("Setting up default keyboard bindings");
+        
+        // Tab key is typically keycode 23 on most keyboards
+        // Alt+Tab (Mod1 + Tab) - cycle windows forward
+        let tab_keycode = 23u8;
+        if let Err(e) = self.add_binding(
+            conn,
+            screen_info,
+            self.mod_map.mod1, // Alt
+            tab_keycode,
+            KeyboardAction::CycleWindows,
+        ) {
+            debug!("Failed to add Alt+Tab binding: {}", e);
+        }
+        
+        // Alt+Shift+Tab (Mod1 + Shift + Tab) - cycle windows backward
+        let alt_shift = self.mod_map.mod1 | self.mod_map.shift;
+        if let Err(e) = self.add_binding(
+            conn,
+            screen_info,
+            alt_shift,
+            tab_keycode,
+            KeyboardAction::CycleWindowsPrev,
+        ) {
+            debug!("Failed to add Alt+Shift+Tab binding: {}", e);
+        }
+        
+        // Workspace switching shortcuts (Ctrl+Alt+Arrow keys)
+        // Arrow keys: Left=113, Right=114, Up=111, Down=116 (typical X11 keycodes)
+        let ctrl_alt = self.mod_map.control | self.mod_map.mod1;
+        let ctrl_alt_shift = ctrl_alt | self.mod_map.shift;
+        
+        // Ctrl+Alt+Left - Switch to previous workspace
+        if let Err(e) = self.add_binding(
+            conn,
+            screen_info,
+            ctrl_alt,
+            113, // Left arrow
+            KeyboardAction::SwitchWorkspace(0), // Will be handled as "previous" in handler
+        ) {
+            debug!("Failed to add Ctrl+Alt+Left binding: {}", e);
+        }
+        
+        // Ctrl+Alt+Right - Switch to next workspace
+        if let Err(e) = self.add_binding(
+            conn,
+            screen_info,
+            ctrl_alt,
+            114, // Right arrow
+            KeyboardAction::SwitchWorkspace(1), // Will be handled as "next" in handler
+        ) {
+            debug!("Failed to add Ctrl+Alt+Right binding: {}", e);
+        }
+        
+        // Ctrl+Alt+Up - Switch to workspace above (for vertical layouts)
+        if let Err(e) = self.add_binding(
+            conn,
+            screen_info,
+            ctrl_alt,
+            111, // Up arrow
+            KeyboardAction::SwitchWorkspace(2), // Will be handled as "up" in handler
+        ) {
+            debug!("Failed to add Ctrl+Alt+Up binding: {}", e);
+        }
+        
+        // Ctrl+Alt+Down - Switch to workspace below (for vertical layouts)
+        if let Err(e) = self.add_binding(
+            conn,
+            screen_info,
+            ctrl_alt,
+            116, // Down arrow
+            KeyboardAction::SwitchWorkspace(3), // Will be handled as "down" in handler
+        ) {
+            debug!("Failed to add Ctrl+Alt+Down binding: {}", e);
+        }
+        
+        // Window management shortcuts
+        // Alt+F4 - Close window (F4 is typically keycode 70)
+        if let Err(e) = self.add_binding(
+            conn,
+            screen_info,
+            self.mod_map.mod1,
+            70, // F4
+            KeyboardAction::CloseWindow,
+        ) {
+            debug!("Failed to add Alt+F4 binding: {}", e);
+        }
+        
+        // Alt+F10 - Maximize window (F10 is typically keycode 76)
+        if let Err(e) = self.add_binding(
+            conn,
+            screen_info,
+            self.mod_map.mod1,
+            76, // F10
+            KeyboardAction::MaximizeWindow,
+        ) {
+            debug!("Failed to add Alt+F10 binding: {}", e);
+        }
+        
+        // Alt+F9 - Minimize window (F9 is typically keycode 75)
+        if let Err(e) = self.add_binding(
+            conn,
+            screen_info,
+            self.mod_map.mod1,
+            75, // F9
+            KeyboardAction::MinimizeWindow,
+        ) {
+            debug!("Failed to add Alt+F9 binding: {}", e);
+        }
+        
+        // Alt+F7 - Move window (F7 is typically keycode 73)
+        if let Err(e) = self.add_binding(
+            conn,
+            screen_info,
+            self.mod_map.mod1,
+            73, // F7
+            KeyboardAction::MoveWindow,
+        ) {
+            debug!("Failed to add Alt+F7 binding: {}", e);
+        }
+        
+        // Alt+F8 - Resize window (F8 is typically keycode 74)
+        if let Err(e) = self.add_binding(
+            conn,
+            screen_info,
+            self.mod_map.mod1,
+            74, // F8
+            KeyboardAction::ResizeWindow,
+        ) {
+            debug!("Failed to add Alt+F8 binding: {}", e);
+        }
+        
         Ok(())
     }
     

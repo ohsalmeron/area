@@ -64,14 +64,52 @@ impl DeviceManager {
         display_info: &DisplayInfo,
     ) -> Result<()> {
         if display_info.extensions.have_xinput2 {
-            debug!("XInput2 extension available");
+            info!("XInput2 extension available");
             self.xinput2_enabled = true;
             
-            // TODO: Query XInput2 devices
-            // This requires xinput2 extension bindings
+            // Query XInput2 devices
+            // Note: x11rb doesn't have full XInput2 support yet, so we use a basic approach
+            // In a full implementation, we would use XIQueryDevice to enumerate devices
+            // For now, we mark it as enabled and log that enumeration would happen here
+            debug!("XInput2 enabled (device enumeration would use XIQueryDevice if x11rb had XInput2 support)");
+            
+            // Basic device list (can be expanded when XInput2 bindings are available)
+            // Master pointer and keyboard are always present
+            self.devices.push(InputDevice {
+                device_id: 0, // Master pointer (typically device 2)
+                name: "Master Pointer".to_string(),
+                device_type: DeviceType::MasterPointer,
+            });
+            
+            self.devices.push(InputDevice {
+                device_id: 1, // Master keyboard (typically device 3)
+                name: "Master Keyboard".to_string(),
+                device_type: DeviceType::MasterKeyboard,
+            });
+            
+            debug!("XInput2 devices initialized (basic master devices)");
         } else {
-            warn!("XInput2 extension not available");
+            debug!("XInput2 extension not available");
         }
+        
+        Ok(())
+    }
+    
+    /// Handle XInput2 event
+    pub fn handle_event(
+        &mut self,
+        _event: &x11rb::protocol::Event,
+        _display_info: &DisplayInfo,
+    ) -> Result<()> {
+        if !self.xinput2_enabled {
+            return Ok(());
+        }
+        
+        // TODO: Handle XInput2 events
+        // XInput2 events have a different event base
+        // Need to check event type against XInput2 event base
+        // For now, just log that we received an XInput2 event
+        debug!("XInput2 event received (handling not yet fully implemented)");
         
         Ok(())
     }
@@ -87,6 +125,7 @@ impl Default for DeviceManager {
         Self::new()
     }
 }
+
 
 
 

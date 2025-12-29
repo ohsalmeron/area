@@ -5,16 +5,13 @@
 
 use anyhow::Result;
 use std::collections::VecDeque;
-use tracing::{debug, info, warn};
-use x11rb::connection::Connection;
+use tracing::{debug, warn};
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
-use x11rb::wrapper::ConnectionExt as _;
 
 use crate::wm::client::Client;
 use crate::wm::client_flags::{ClientFlags, XfwmFlags};
 use crate::wm::display::DisplayInfo;
-use crate::wm::ewmh::Atoms;
 use crate::wm::screen::ScreenInfo;
 
 /// Focus policy (matches xfwm4 focus policies)
@@ -86,6 +83,16 @@ impl FocusManager {
         client: &mut Client,
         source: FocusSource,
     ) -> Result<()> {
+        // Check input hint - windows with input: false should not receive focus
+        if let Some(ref wm_hints) = client.wm_hints {
+            // Check if InputHint flag is set and input is false
+            const INPUT_HINT_FLAG: u32 = 1 << 0; // InputHint
+            if (wm_hints.flags & INPUT_HINT_FLAG) != 0 && !wm_hints.input {
+                debug!("Window {} has input: false, skipping focus", client.window);
+                return Ok(());
+            }
+        }
+        
         // Check if focus stealing is allowed
         if !self.focus_stealing_allowed(client, source) {
             debug!("Focus stealing prevented for window {}", client.window);
@@ -120,11 +127,8 @@ impl FocusManager {
             x11rb::CURRENT_TIME,
         )?;
         
-        // Raise window
-        conn.configure_window(
-            client.window,
-            &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-        )?;
+        // Note: Window raising is handled by StackingManager in WindowManager::set_focus
+        // This keeps stacking logic centralized
         
         // Update client flags
         client.set_focused(true);

@@ -3,13 +3,12 @@
 //! Manages X11 display connection, extensions, atoms, cursors, and global state.
 //! This is the top-level structure in xfwm4's architecture.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
-use x11rb::wrapper::ConnectionExt as _;
 
 use crate::wm::ewmh::Atoms;
 
@@ -48,6 +47,8 @@ pub struct Extensions {
     pub fixes_event_base: i32,
     pub present_error_base: i32,
     pub present_event_base: i32,
+    pub xinput2_error_base: i32,
+    pub xinput2_event_base: i32,
 }
 
 impl Default for Extensions {
@@ -83,6 +84,8 @@ impl Default for Extensions {
             fixes_event_base: 0,
             present_error_base: 0,
             present_event_base: 0,
+            xinput2_error_base: 0,
+            xinput2_event_base: 0,
         }
     }
 }
@@ -101,14 +104,50 @@ impl Cursors {
         let font = conn.generate_id()?;
         conn.open_font(font, b"cursor")?;
         
-        // Create cursors (simplified - xfwm4 uses XCreateFontCursor)
-        // For now, we'll use default cursors
-        let busy = 0; // TODO: Create busy cursor
-        let move_cursor = 0; // TODO: Create move cursor
-        let root = 0; // TODO: Create root cursor
+        // Create cursors using font glyphs
+        // Cursor font glyph IDs from X11 cursor font:
+        // - watch (busy): 75
+        // - fleur (move): 26
+        // - left_ptr (root): 34
+        // - Resize cursors: top_left_corner=67, top_side=69, top_right_corner=68,
+        //   right_side=48, bottom_right_corner=7, bottom_side=8,
+        //   bottom_left_corner=6, left_side=35
         
-        // Resize cursors: top-left, top, top-right, right, bottom-right, bottom, bottom-left, left
-        let resize = [0; 8]; // TODO: Create resize cursors
+        // Helper function to create a glyph cursor
+        let create_cursor = |glyph_id: u16| -> Result<u32> {
+            let cursor_id = conn.generate_id()?;
+            conn.create_glyph_cursor(
+                cursor_id,
+                font,
+                font,
+                glyph_id,      // source_char
+                glyph_id + 1,  // mask_char (glyph + 1 for mask)
+                0, 0, 0,       // foreground: black
+                0xffff, 0xffff, 0xffff,  // background: white
+            )?;
+            Ok(cursor_id)
+        };
+        
+        // Create busy cursor (watch/hourglass)
+        let busy = create_cursor(75)?;
+        
+        // Create move cursor (fleur)
+        let move_cursor = create_cursor(26)?;
+        
+        // Create root cursor (left_ptr/default pointer)
+        let root = create_cursor(34)?;
+        
+        // Create resize cursors in order: top-left, top, top-right, right, bottom-right, bottom, bottom-left, left
+        let resize = [
+            create_cursor(67)?,  // top_left_corner
+            create_cursor(69)?,  // top_side
+            create_cursor(68)?,  // top_right_corner
+            create_cursor(48)?,  // right_side
+            create_cursor(7)?,   // bottom_right_corner
+            create_cursor(8)?,   // bottom_side
+            create_cursor(6)?,   // bottom_left_corner
+            create_cursor(35)?,  // left_side
+        ];
         
         conn.close_font(font)?;
         
@@ -249,7 +288,11 @@ impl DisplayInfo {
                 ext.have_shape = true;
                 ext.shape_event_base = reply.first_event as i32;
                 // Query version
-                // TODO: QueryShapeVersion
+                use x11rb::protocol::shape::ConnectionExt;
+                if let Ok(version_reply) = conn.shape_query_version()?.reply() {
+                    ext.shape_version = (version_reply.major_version as i32, version_reply.minor_version as i32);
+                    debug!("Shape extension version: {}.{}", version_reply.major_version, version_reply.minor_version);
+                }
             }
         }
         
@@ -296,7 +339,14 @@ impl DisplayInfo {
                 ext.composite_event_base = reply.first_event as i32;
                 ext.composite_error_base = reply.first_error as i32;
                 // Check for NameWindowPixmap (version >= 0.2)
-                // TODO: QueryCompositeVersion
+                use x11rb::protocol::composite::ConnectionExt;
+                if let Ok(version_reply) = conn.composite_query_version(0, 4)?.reply() {
+                    debug!("Composite extension version: {}.{}", version_reply.major_version, version_reply.minor_version);
+                    // Check for NameWindowPixmap (version >= 0.2)
+                    if version_reply.major_version > 0 || version_reply.minor_version >= 2 {
+                        ext.have_name_window_pixmap = true;
+                    }
+                }
             }
         }
         
@@ -330,9 +380,17 @@ impl DisplayInfo {
         let extensions = conn.query_extension(b"XInputExtension")?;
         if let Ok(reply) = extensions.reply() {
             if reply.present {
+                ext.xinput2_event_base = reply.first_event as i32;
+                ext.xinput2_error_base = reply.first_error as i32;
                 // Check for XInput2 (version >= 2.0)
-                // TODO: QueryXInputVersion
-                ext.have_xinput2 = true;
+                use x11rb::protocol::xinput::xi_query_version;
+                if let Ok(version_reply) = xi_query_version(conn, 2, 0)?.reply() {
+                    debug!("XInput extension version: {}.{}", version_reply.major_version, version_reply.minor_version);
+                    // XInput2 is version >= 2.0
+                    if version_reply.major_version >= 2 {
+                        ext.have_xinput2 = true;
+                    }
+                }
             }
         }
         

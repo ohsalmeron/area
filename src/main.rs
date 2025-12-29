@@ -142,8 +142,66 @@ impl AreaApp {
         info!("X11 async event stream initialized");
         
         // Initialize window manager
-        let wm = wm::WindowManager::new(&conn, screen_num, root, replace)
+        let mut wm = wm::WindowManager::new(conn.clone(), screen_num, root, replace)
             .context("Failed to initialize window manager")?;
+        
+        // Load settings from file
+        let home_dir = std::env::var("HOME").unwrap_or_else(|_| {
+            // Fallback: try to get home from passwd
+            std::env::var("USER").map(|user| format!("/home/{}", user)).unwrap_or_else(|_| ".".to_string())
+        });
+        let settings_path = std::path::Path::new(&home_dir)
+            .join(".config")
+            .join("area")
+            .join("settings.toml");
+        
+        // Create directory if it doesn't exist
+        if let Some(parent) = settings_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        
+        if let Err(e) = wm.settings_manager.load_from_file(settings_path.to_str().unwrap_or("~/.config/area/settings.toml")) {
+            warn!("Failed to load settings from {:?}: {}, using defaults", settings_path, e);
+        } else {
+            info!("Loaded settings from {:?}", settings_path);
+            
+            // Apply settings to managers
+            let settings = wm.settings_manager.get_settings();
+            
+            // Apply workspace count
+            if settings.workspace_count != wm.workspace_manager.workspace_count {
+                if let Err(e) = wm.workspace_manager.set_workspace_count(
+                    &conn,
+                    &wm.display_info,
+                    &wm.screen_info,
+                    settings.workspace_count,
+                ) {
+                    warn!("Failed to set workspace count to {}: {}", settings.workspace_count, e);
+                }
+            }
+            
+            // Apply placement policy (already done in manage_window, but set it here too)
+            wm.placement_manager.policy = settings.placement_policy;
+            
+            // Apply focus policy to FocusManager
+            use crate::wm::settings::FocusPolicy as SettingsFocusPolicy;
+            use crate::wm::focus::FocusPolicy as ManagerFocusPolicy;
+            wm.focus_manager.focus_policy = match settings.focus_policy {
+                SettingsFocusPolicy::ClickToFocus => ManagerFocusPolicy::ClickToFocus,
+                SettingsFocusPolicy::FocusFollowsMouse => ManagerFocusPolicy::FocusFollowsMouse,
+                SettingsFocusPolicy::SloppyFocus => ManagerFocusPolicy::SloppyFocus,
+            };
+            wm.focus_manager.prevent_focus_stealing = settings.prevent_focus_stealing;
+        }
+        
+        // Initialize session manager
+        if let Err(e) = wm.session_manager.initialize(
+            &conn,
+            &wm.display_info,
+            &wm.screen_info,
+        ) {
+            warn!("Failed to initialize session manager: {}", e);
+        }
         
         // Initialize shell
         let shell = shell::Shell::new(screen_width, screen_height, config.panel.clone());
@@ -220,6 +278,13 @@ impl AreaApp {
         
         // Scan for existing windows
         app.scan_existing_windows()?;
+        
+        // Restore session state after all windows are managed
+        if let Err(e) = app.wm.session_manager.restore_state(&mut app.wm_windows) {
+            warn!("Failed to restore session state: {}", e);
+        } else {
+            info!("Session state restored");
+        }
         
         Ok(app)
     }
@@ -319,7 +384,11 @@ impl AreaApp {
         loop {
             // Check exit flag
             if should_exit {
-                info!("Exiting main loop");
+                info!("Exiting main loop, saving session state...");
+                // Save window state before exiting
+                if let Err(e) = self.wm.session_manager.save_state(&self.wm_windows) {
+                    warn!("Failed to save session state: {}", e);
+                }
                 return Ok(());
             }
             
@@ -415,6 +484,19 @@ impl AreaApp {
                             debug!("Error scanning for unmanaged windows: {}", e);
                         }
                     }
+                    
+                    // Check for unresponsive windows (timeout after WM_DELETE_WINDOW)
+                    // Use current time (in milliseconds) - approximate server time
+                    let current_time_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u32;
+                    let unresponsive = self.wm.terminate_manager.check_unresponsive(current_time_ms);
+                    for window_id in unresponsive {
+                        warn!("Window {} is unresponsive (no response to WM_DELETE_WINDOW)", window_id);
+                        // Window is now marked as unresponsive in terminate_manager
+                        // Next time close_window is called, it will show force quit dialog
+                    }
                 }
             };
         }
@@ -499,6 +581,47 @@ impl AreaApp {
             self.screen_height = current_height;
             // Update shell with new screen size
             self.shell.set_screen_size(current_width, current_height);
+        }
+        
+        // Handle XInput2 events first (if XInput2 is enabled)
+        // Note: x11rb doesn't expose GenericEvent directly, but XInput2 events
+        // come through as extension events. We can check the response_type against
+        // the XInput2 event base if available. For now, XInput2 event handling
+        // is done in DeviceManager when explicitly called (e.g., from input handling).
+        // Most XInput2 events are handled through normal X11 event types (KeyPress, etc.)
+        // when XInput2 is enabled, so explicit GenericEvent handling may not be needed.
+        
+        // Filter event before processing
+        let window_id = match &event {
+            Event::MapRequest(e) => e.window,
+            Event::UnmapNotify(e) => e.window,
+            Event::ConfigureRequest(e) => e.window,
+            Event::CreateNotify(e) => e.window,
+            Event::DestroyNotify(e) => e.window,
+            Event::ClientMessage(e) => e.window,
+            Event::MapNotify(e) => e.window,
+            Event::ButtonPress(e) => e.event,
+            Event::ButtonRelease(e) => e.event,
+            Event::MotionNotify(e) => e.event,
+            Event::KeyPress(e) => e.event,
+            Event::KeyRelease(e) => e.event,
+            Event::PropertyNotify(e) => e.window,
+            Event::FocusIn(e) => e.event,
+            Event::FocusOut(e) => e.event,
+            _ => 0,
+        };
+        
+        // Apply event filter
+        if window_id != 0 {
+            match self.wm.event_filter_manager.filter_event(&event, window_id) {
+                crate::wm::event_filter::FilterStatus::Remove => {
+                    debug!("Event filtered out by EventFilterManager");
+                    return Ok(());
+                }
+                crate::wm::event_filter::FilterStatus::Pass => {
+                    // Continue processing
+                }
+            }
         }
         
         match event {
@@ -652,6 +775,79 @@ impl AreaApp {
             }
             
             Event::ClientMessage(e) => {
+                // Handle GTK_SHOW_WINDOW_MENU
+                if e.type_ == self.wm.menu_manager.gtk_show_window_menu && e.format == 32 {
+                    debug!("ClientMessage: GTK_SHOW_WINDOW_MENU for window {}", e.window);
+                    let data32 = e.data.as_data32();
+                    let data_array: [u32; 5] = [
+                        data32[0],
+                        data32[1],
+                        data32[2],
+                        data32[3],
+                        data32[4],
+                    ];
+                    if let Err(err) = self.wm.menu_manager.handle_gtk_show_window_menu(
+                        &self.conn,
+                        &self.wm.display_info,
+                        &self.wm.screen_info,
+                        e.window,
+                        &data_array,
+                        &self.wm_windows,
+                    ) {
+                        warn!("Failed to handle GTK_SHOW_WINDOW_MENU: {}", err);
+                    }
+                    return Ok(());
+                }
+                
+                // Handle _NET_MOVERESIZE_WINDOW
+                if e.type_ == self.wm.atoms._net_moveresize_window && e.format == 32 {
+                    debug!("ClientMessage: _NET_MOVERESIZE_WINDOW for window {}", e.window);
+                    let data32 = e.data.as_data32();
+                    let data_array: [u32; 5] = [
+                        data32[0],
+                        data32[1],
+                        data32[2],
+                        data32[3],
+                        data32[4],
+                    ];
+                    if let Err(err) = crate::wm::netwm::handle_net_moveresize_window(
+                        &self.conn,
+                        &self.wm.display_info,
+                        &self.wm.screen_info,
+                        e.window,
+                        &data_array,
+                        &mut self.wm_windows,
+                    ) {
+                        warn!("Failed to handle _NET_MOVERESIZE_WINDOW: {}", err);
+                    }
+                    return Ok(());
+                }
+                
+                // Handle _NET_WM_MOVERESIZE
+                if e.type_ == self.wm.atoms._net_wm_moveresize && e.format == 32 {
+                    debug!("ClientMessage: _NET_WM_MOVERESIZE for window {}", e.window);
+                    let data32 = e.data.as_data32();
+                    let data_array: [u32; 5] = [
+                        data32[0],
+                        data32[1],
+                        data32[2],
+                        data32[3],
+                        data32[4],
+                    ];
+                    if let Err(err) = crate::wm::netwm::handle_net_wm_moveresize(
+                        &self.conn,
+                        &self.wm.display_info,
+                        &self.wm.screen_info,
+                        e.window,
+                        &data_array,
+                        &mut self.wm_windows,
+                        &mut self.wm.move_resize_manager,
+                    ) {
+                        warn!("Failed to handle _NET_WM_MOVERESIZE: {}", err);
+                    }
+                    return Ok(());
+                }
+                
                 // Handle _NET_CLOSE_WINDOW (EWMH close request)
                 if let Ok(net_close_atom) = self.conn.as_ref().intern_atom(false, b"_NET_CLOSE_WINDOW")?.reply() {
                     if e.type_ == net_close_atom.atom && e.format == 32 {
@@ -667,6 +863,23 @@ impl AreaApp {
                         }
                         return Ok(());
                     }
+                }
+                
+                // Handle _NET_CURRENT_DESKTOP (workspace switch request)
+                if e.type_ == self.wm.atoms.net_current_desktop && e.format == 32 {
+                    let data32 = e.data.as_data32();
+                    let workspace = data32[0];
+                    debug!("ClientMessage: _NET_CURRENT_DESKTOP workspace={}", workspace);
+                    if let Err(err) = self.wm.workspace_manager.switch_workspace(
+                        &self.conn,
+                        &self.wm.display_info,
+                        &self.wm.screen_info,
+                        workspace,
+                        &mut self.wm_windows,
+                    ) {
+                        warn!("Failed to switch workspace to {}: {}", workspace, err);
+                    }
+                    return Ok(());
                 }
                 
                 // Handle _NET_WM_STATE (EWMH state change requests)
@@ -686,8 +899,6 @@ impl AreaApp {
                         let net_wm_state_maximized_vert = self.wm.atoms._net_wm_state_maximized_vert;
                         let net_wm_state_maximized_horz = self.wm.atoms._net_wm_state_maximized_horz;
                         let net_wm_state_hidden = self.wm.atoms._net_wm_state_hidden;
-                        let net_wm_state_above = self.wm.atoms._net_wm_state_above;
-                        let net_wm_state_below = self.wm.atoms._net_wm_state_below;
                         let net_wm_state_shaded = self.wm.atoms._net_wm_state_shaded;
                         let net_wm_state_sticky = self.wm.atoms._net_wm_state_sticky;
                         let net_wm_state_modal = self.wm.atoms._net_wm_state_modal;
@@ -785,16 +996,19 @@ impl AreaApp {
                                 let should_change = should_apply(current, action);
                                 
                                 if should_change {
-                                    if let Some(client) = self.wm_windows.get_mut(&client_id) {
-                                        if current {
-                                            if let Err(err) = self.wm.restore_window(&self.conn, client) {
-                                                warn!("Failed to restore window {}: {}", client_id, err);
-                                            } else {
-                                                state_changed = true;
-                                            }
+                                    let window_id = client_id;
+                                    if current {
+                                        // Restore window - use window_id to avoid borrow issues
+                                        if let Err(err) = self.wm.restore_window_by_id(&self.conn, &mut self.wm_windows, window_id) {
+                                            warn!("Failed to restore window {}: {}", window_id, err);
                                         } else {
+                                            state_changed = true;
+                                        }
+                                    } else {
+                                        // Maximize window
+                                        if let Some(client) = self.wm_windows.get_mut(&window_id) {
                                             if let Err(err) = self.wm.maximize_window(&self.conn, client) {
-                                                warn!("Failed to maximize window {}: {}", client_id, err);
+                                                warn!("Failed to maximize window {}: {}", window_id, err);
                                             } else {
                                                 state_changed = true;
                                             }
@@ -813,21 +1027,25 @@ impl AreaApp {
                                 if should_change {
                                     if current {
                                         // Unminimize (restore)
-                                        if let Some(client) = self.wm_windows.get_mut(&client_id) {
-                                            if let Err(err) = self.wm.restore_window(&self.conn, client) {
-                                                warn!("Failed to restore window {}: {}", client_id, err);
+                                        // Unminimize (restore)
+                                        let window_id = client_id;
+                                        let frame_option = self.wm_windows.get(&window_id).and_then(|c| c.frame.clone());
+                                        // Restore window - use window_id to avoid borrow issues
+                                        if let Err(err) = self.wm.restore_window_by_id(&self.conn, &mut self.wm_windows, window_id) {
+                                            warn!("Failed to restore window {}: {}", window_id, err);
+                                        } else {
+                                            // Map the window
+                                            if let Some(frame) = &frame_option {
+                                                self.conn.as_ref().map_window(frame.frame)?;
                                             } else {
-                                                // Map the window
-                                                if let Some(frame) = &client.frame {
-                                                    self.conn.as_ref().map_window(frame.frame)?;
-                                                } else {
-                                                    self.conn.as_ref().map_window(client_id)?;
-                                                }
+                                                self.conn.as_ref().map_window(window_id)?;
+                                            }
+                                            if let Some(client) = self.wm_windows.get_mut(&window_id) {
                                                 client.set_mapped(true);
                                                 client.flags.remove(crate::wm::client_flags::ClientFlags::ICONIFIED);
-                                                self.conn.as_ref().flush()?;
-                                                state_changed = true;
                                             }
+                                            self.conn.as_ref().flush()?;
+                                            state_changed = true;
                                         }
                                     } else {
                                         // Minimize
@@ -842,6 +1060,9 @@ impl AreaApp {
                         }
                         
                         // Handle ABOVE (mutually exclusive with BELOW)
+                        let net_wm_state_above = self.wm.atoms._net_wm_state_above;
+                        let net_wm_state_below = self.wm.atoms._net_wm_state_below;
+                        
                         if first_atom == net_wm_state_above || second_atom == net_wm_state_above {
                             if let Some(client) = self.wm_windows.get_mut(&client_id) {
                                 let current = client.flags.contains(crate::wm::client_flags::ClientFlags::ABOVE);
@@ -875,6 +1096,19 @@ impl AreaApp {
                                         add_atoms,
                                         remove_atoms,
                                     )?;
+                                    // Use StackingManager to raise window with transients
+                                    if !current {
+                                        if let Err(err) = self.wm.stacking_manager.raise_window_with_transients(
+                                            &self.conn,
+                                            &self.wm.display_info,
+                                            &self.wm.screen_info,
+                                            client.window,
+                                            &self.wm_windows,
+                                            &self.wm.transient_manager.transients,
+                                        ) {
+                                            warn!("Failed to raise window {}: {}", client_id, err);
+                                        }
+                                    }
                                     self.conn.as_ref().flush()?;
                                     state_changed = true;
                                 }
@@ -934,7 +1168,7 @@ impl AreaApp {
                         
                         for (atom, state_name) in property_only_states.iter() {
                             if first_atom == *atom || second_atom == *atom {
-                                if let Some(_client) = self.wm_windows.get_mut(&client_id) {
+                                if let Some(client) = self.wm_windows.get_mut(&client_id) {
                                     // Get current state from property
                                     let mut current = false;
                                     if let Ok(reply) = self.conn.as_ref().get_property(
@@ -952,20 +1186,36 @@ impl AreaApp {
                                     
                                     let should_change = should_apply(current, action);
                                     if should_change {
-                                        let (add_atoms, remove_atoms) = if !current {
-                                            (&[*atom] as &[u32], &[] as &[u32])
+                                        // Handle SHADED state specially (needs window operations)
+                                        if *atom == net_wm_state_shaded {
+                                            if !current {
+                                                // Shade window
+                                                if let Err(err) = self.wm.shade_window(&self.conn, &mut self.wm_windows, client_id) {
+                                                    warn!("Failed to shade window {}: {}", client_id, err);
+                                                }
+                                            } else {
+                                                // Unshade window
+                                                if let Err(err) = self.wm.unshade_window(&self.conn, &mut self.wm_windows, client_id) {
+                                                    warn!("Failed to unshade window {}: {}", client_id, err);
+                                                }
+                                            }
+                                            state_changed = true;
                                         } else {
-                                            (&[] as &[u32], &[*atom] as &[u32])
-                                        };
-                                        self.wm.atoms.set_window_state(
-                                            &self.conn,
-                                            client_id,
-                                            add_atoms,
-                                            remove_atoms,
-                                        )?;
-                                        self.conn.as_ref().flush()?;
-                                        debug!("Updated {} state for window {} to {}", state_name, client_id, !current);
-                                        state_changed = true;
+                                            let (add_atoms, remove_atoms) = if !current {
+                                                (&[*atom] as &[u32], &[] as &[u32])
+                                            } else {
+                                                (&[] as &[u32], &[*atom] as &[u32])
+                                            };
+                                            self.wm.atoms.set_window_state(
+                                                &self.conn,
+                                                client_id,
+                                                add_atoms,
+                                                remove_atoms,
+                                            )?;
+                                            self.conn.as_ref().flush()?;
+                                            debug!("Updated {} state for window {} to {}", state_name, client_id, !current);
+                                            state_changed = true;
+                                        }
                                     }
                                 }
                             }
@@ -985,15 +1235,42 @@ impl AreaApp {
                     if e.type_ == net_active_atom.atom && e.format == 32 {
                         debug!("ClientMessage: _NET_ACTIVE_WINDOW for window {}", e.window);
                         let data32 = e.data.as_data32();
-                        let _source_indication = data32[0]; // 0=application, 1=pager, 2=wm
+                        let source_indication = data32[0]; // 0=application, 1=pager, 2=wm
                         let _timestamp = data32[1]; // timestamp or 0
                         
                         // Find the client window
                         let client_id = self.wm.find_client_from_window(&self.wm_windows, e.window);
                         if let Some(client_id) = client_id {
-                            // Focus the window
-                            if let Err(err) = self.wm.set_focus(&self.conn, &mut self.wm_windows, client_id) {
-                                warn!("Failed to focus window {} via _NET_ACTIVE_WINDOW: {}", client_id, err);
+                            if let Some(client) = self.wm_windows.get_mut(&client_id) {
+                                // Determine focus source
+                                let source = match source_indication {
+                                    0 => crate::wm::focus::FocusSource::Application,
+                                    1 => crate::wm::focus::FocusSource::Pager,
+                                    _ => crate::wm::focus::FocusSource::Other,
+                                };
+                                
+                                // Focus the window using FocusManager
+                                if let Err(err) = self.wm.focus_manager.set_focus(
+                                    &self.conn,
+                                    &self.wm.display_info,
+                                    &self.wm.screen_info,
+                                    client,
+                                    source,
+                                ) {
+                                    warn!("Failed to focus window {} via _NET_ACTIVE_WINDOW: {}", client_id, err);
+                                } else {
+                                    // Raise window using StackingManager (with transients)
+                                    if let Err(err) = self.wm.stacking_manager.raise_window_with_transients(
+                                        &self.conn,
+                                        &self.wm.display_info,
+                                        &self.wm.screen_info,
+                                        client.window,
+                                        &self.wm_windows,
+                                        &self.wm.transient_manager.transients,
+                                    ) {
+                                        warn!("Failed to raise window {}: {}", client_id, err);
+                                    }
+                                }
                             }
                         } else {
                             debug!("_NET_ACTIVE_WINDOW for unmanaged window {}", e.window);
@@ -1064,6 +1341,12 @@ impl AreaApp {
                         // Window is already managed, just mark it as mapped
                         if let Some(client) = self.wm_windows.get_mut(&e.window) {
                             client.set_mapped(true);
+                            
+                            // Mark startup complete even for reparented windows
+                            self.wm.startup_manager.mark_window_complete(e.window);
+                            
+                            // Update busy cursor after marking startup complete
+                            let _ = self.update_startup_cursor();
                         }
                         return Ok(());
                     }
@@ -1093,22 +1376,87 @@ impl AreaApp {
                                     // Launch navigator or terminal
                                     info!("Launcher button clicked, launching application launcher");
                                     let launcher_cmd = self.config.keybindings.launcher_command.clone();
-                                    let mut cmd = std::process::Command::new(&launcher_cmd);
+                                    
+                                    // Try to find the command in PATH
+                                    let cmd_path = if launcher_cmd.contains('/') {
+                                        // Absolute or relative path provided
+                                        launcher_cmd.clone()
+                                    } else {
+                                        // Try to find in PATH using multiple methods
+                                        let mut found_path = None;
+                                        
+                                        // Method 1: Try `which` command
+                                        if let Ok(output) = std::process::Command::new("which")
+                                            .arg(&launcher_cmd)
+                                            .output()
+                                        {
+                                            if output.status.success() {
+                                                if let Ok(path) = String::from_utf8(output.stdout) {
+                                                    let trimmed = path.trim();
+                                                    if !trimmed.is_empty() {
+                                                        found_path = Some(trimmed.to_string());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        
+                                        // Method 2: Manually search PATH if `which` failed
+                                        if found_path.is_none() {
+                                            if let Ok(path_var) = std::env::var("PATH") {
+                                                for dir in path_var.split(':') {
+                                                    let test_path = std::path::Path::new(dir).join(&launcher_cmd);
+                                                    if test_path.exists() && test_path.is_file() {
+                                                        found_path = Some(test_path.to_string_lossy().to_string());
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        
+                                        // Method 3: Try common locations
+                                        if found_path.is_none() {
+                                            let common_paths = [
+                                                format!("/usr/bin/{}", launcher_cmd),
+                                                format!("/usr/local/bin/{}", launcher_cmd),
+                                                format!("/bin/{}", launcher_cmd),
+                                            ];
+                                            for path_str in &common_paths {
+                                                let path = std::path::Path::new(path_str);
+                                                if path.exists() && path.is_file() {
+                                                    found_path = Some(path_str.clone());
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        
+                                        found_path.unwrap_or_else(|| launcher_cmd.clone())
+                                    };
+                                    
+                                    // Try to launch the command
+                                    let mut cmd = std::process::Command::new(&cmd_path);
                                     cmd.env("DISPLAY", &self.display);
                                     if let Ok(xauth) = std::env::var("XAUTHORITY") {
                                         cmd.env("XAUTHORITY", xauth);
                                     }
-                                    if let Err(err) = cmd.spawn() {
-                                        warn!("Failed to launch {}: {}", launcher_cmd, err);
+                                    
+                                    let launch_result = cmd.spawn();
+                                    
+                                    if let Err(err) = launch_result {
+                                        warn!("Failed to launch {} (tried: {}): {}", launcher_cmd, cmd_path, err);
                                         // Fallback: try launching terminal directly
+                                        info!("Falling back to xfce4-terminal");
                                         let mut term_cmd = std::process::Command::new("xfce4-terminal");
                                         term_cmd.env("DISPLAY", &self.display);
                                         if let Ok(xauth) = std::env::var("XAUTHORITY") {
                                             term_cmd.env("XAUTHORITY", xauth);
                                         }
                                         if let Err(err) = term_cmd.spawn() {
-                                            warn!("Failed to launch fallback terminal: {}", err);
+                                            warn!("Failed to launch fallback terminal (xfce4-terminal): {}", err);
+                                        } else {
+                                            info!("Successfully launched fallback terminal");
                                         }
+                                    } else {
+                                        debug!("Successfully launched {} from {}", launcher_cmd, cmd_path);
                                     }
                                 }
                                 crate::shell::panel::PanelClickAction::Logout => {
@@ -1144,8 +1492,9 @@ impl AreaApp {
                     }
                     
                     // Not a button - could be titlebar or client window
-                    if let Some(client) = self.wm_windows.get(&client_id) {
-                        let is_titlebar_click = if let Some(frame) = &client.frame {
+                    // First, determine if it's a titlebar click (need to check client first)
+                    let is_titlebar_click = if let Some(client) = self.wm_windows.get(&client_id) {
+                        if let Some(frame) = &client.frame {
                             // Check if click is on titlebar window OR frame window in titlebar area
                             if e.event == frame.titlebar {
                                 true
@@ -1160,12 +1509,18 @@ impl AreaApp {
                             }
                         } else {
                             false
-                        };
-                        
-                        // Focus the window
-                        if let Err(err) = self.wm.set_focus(&self.conn, &mut self.wm_windows, client_id) {
-                            warn!("Failed to focus window {}: {}", client_id, err);
                         }
+                    } else {
+                        false
+                    };
+                    
+                    // Focus the window (drop immutable borrow first)
+                    if let Err(err) = self.wm.set_focus(&self.conn, &mut self.wm_windows, client_id) {
+                        warn!("Failed to focus window {}: {}", client_id, err);
+                    }
+                    
+                    // Get client again for titlebar/resize handling
+                    if let Some(client) = self.wm_windows.get(&client_id) {
                         
                         // Handle titlebar clicks with Button1
                         if is_titlebar_click && e.detail == 1 {
@@ -1194,12 +1549,85 @@ impl AreaApp {
                                 // Single click - start drag and track for potential double-click
                                 // Get root coordinates for the click
                                 if let Ok(pointer) = self.conn.as_ref().query_pointer(self.root)?.reply() {
-                                    if let Err(err) = self.wm.start_drag(&self.conn, &self.wm_windows, client_id, pointer.root_x, pointer.root_y) {
-                                        warn!("Failed to start drag for window {}: {}", client_id, err);
+                                    if let Some(client) = self.wm_windows.get(&client_id) {
+                                        if let Err(err) = self.wm.move_resize_manager.start_move(
+                                            &self.conn,
+                                            &self.wm.display_info,
+                                            &self.wm.screen_info,
+                                            client_id,
+                                            pointer.root_x,
+                                            pointer.root_y,
+                                            client,
+                                        ) {
+                                            warn!("Failed to start move for window {}: {}", client_id, err);
+                                        }
                                     }
                                 }
                                 // Track this click for double-click detection
                                 self.last_titlebar_click = Some((client_id, e.time, e.event_x, e.event_y));
+                            }
+                        } else if e.detail == 1 && !is_titlebar_click {
+                            // Click on frame but not titlebar - check if it's on an edge/corner for resizing
+                            let frame_opt = client.frame.as_ref().map(|f| (f.frame, f));
+                            if let Some((frame_window, frame)) = frame_opt {
+                                // Check if click is on frame window (not titlebar)
+                                if e.event == frame_window {
+                                    let titlebar_height = self.config.window_manager.decorations.titlebar_height as i16;
+                                    let border_width = self.config.window_manager.decorations.border_width as i16;
+                                    
+                                    // Get frame geometry to determine click position relative to edges
+                                    if let Ok(geom) = self.conn.as_ref().get_geometry(frame_window)?.reply() {
+                                        let frame_width = geom.width as i16;
+                                        let frame_height = geom.height as i16;
+                                        
+                                        // Determine resize direction based on click position
+                                        // Check if click is near edges (within 5 pixels)
+                                        const EDGE_THRESHOLD: i16 = 5;
+                                        let mut resize_dir = None;
+                                        
+                                        // Check corners first (higher priority)
+                                        if e.event_x < EDGE_THRESHOLD && e.event_y < (titlebar_height + EDGE_THRESHOLD) {
+                                            resize_dir = Some(crate::wm::moveresize::ResizeDirection::TopLeft);
+                                        } else if e.event_x >= (frame_width - EDGE_THRESHOLD) && e.event_y < (titlebar_height + EDGE_THRESHOLD) {
+                                            resize_dir = Some(crate::wm::moveresize::ResizeDirection::TopRight);
+                                        } else if e.event_x < EDGE_THRESHOLD && e.event_y >= (frame_height - EDGE_THRESHOLD) {
+                                            resize_dir = Some(crate::wm::moveresize::ResizeDirection::BottomLeft);
+                                        } else if e.event_x >= (frame_width - EDGE_THRESHOLD) && e.event_y >= (frame_height - EDGE_THRESHOLD) {
+                                            resize_dir = Some(crate::wm::moveresize::ResizeDirection::BottomRight);
+                                        }
+                                        // Check edges
+                                        else if e.event_x < EDGE_THRESHOLD {
+                                            resize_dir = Some(crate::wm::moveresize::ResizeDirection::Left);
+                                        } else if e.event_x >= (frame_width - EDGE_THRESHOLD) {
+                                            resize_dir = Some(crate::wm::moveresize::ResizeDirection::Right);
+                                        } else if e.event_y < (titlebar_height + EDGE_THRESHOLD) && e.event_y >= titlebar_height {
+                                            resize_dir = Some(crate::wm::moveresize::ResizeDirection::Top);
+                                        } else if e.event_y >= (frame_height - EDGE_THRESHOLD) {
+                                            resize_dir = Some(crate::wm::moveresize::ResizeDirection::Bottom);
+                                        }
+                                        
+                                        if let Some(direction) = resize_dir {
+                                            // Start resize operation - need to get client again after dropping borrow
+                                            if let Ok(pointer) = self.conn.as_ref().query_pointer(self.root)?.reply() {
+                                                if let Some(client) = self.wm_windows.get(&client_id) {
+                                                    if let Err(err) = self.wm.move_resize_manager.start_resize(
+                                                        &self.conn,
+                                                        &self.wm.display_info,
+                                                        &self.wm.screen_info,
+                                                        client_id,
+                                                        pointer.root_x,
+                                                        pointer.root_y,
+                                                        direction,
+                                                        client,
+                                                    ) {
+                                                        warn!("Failed to start resize for window {}: {}", client_id, err);
+                                                    }
+                                                }
+                                            }
+                                            return Ok(());
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1238,8 +1666,14 @@ impl AreaApp {
                 }
                 
                 // End drag/resize
-                if let Err(err) = self.wm.end_drag(&self.conn) {
-                    debug!("Error ending drag: {}", err);
+                if self.wm.move_resize_manager.state.is_some() {
+                    if let Err(err) = self.wm.move_resize_manager.finish(
+                        &self.conn,
+                        &self.wm.display_info,
+                        &self.wm.screen_info,
+                    ) {
+                        debug!("Error finishing move/resize: {}", err);
+                    }
                 }
             }
             
@@ -1247,10 +1681,64 @@ impl AreaApp {
                 // Update cursor position in compositor
                 self.compositor.update_cursor(e.root_x, e.root_y, true);
                 
-                // Handle drag - use root coordinates for proper dragging
-                if self.wm.is_dragging() {
-                    if let Err(err) = self.wm.update_drag(&self.conn, &mut self.wm_windows, e.root_x, e.root_y) {
-                        debug!("Error updating drag: {}", err);
+                // Handle move/resize - use root coordinates for proper dragging
+                // Clone state to avoid borrow checker issues
+                let state_clone = self.wm.move_resize_manager.state.clone();
+                if let Some(ref state) = state_clone {
+                    if state.active {
+                        let window_id = state.window;
+                        let operation = state.operation;
+                        if let Some(client) = self.wm_windows.get_mut(&window_id) {
+                            // Store old geometry before move (for transient movement)
+                            let old_x = client.geometry.x;
+                            let old_y = client.geometry.y;
+                            
+                            if let Err(err) = self.wm.move_resize_manager.handle_motion(
+                                &self.conn,
+                                &self.wm.display_info,
+                                &self.wm.screen_info,
+                                e.root_x,
+                                e.root_y,
+                                client,
+                            ) {
+                                debug!("Error handling move/resize motion: {}", err);
+                            } else {
+                                // If this is a move operation, move transients with parent
+                                if matches!(operation, crate::wm::moveresize::MoveResizeOperation::Move) {
+                                    let dx = client.geometry.x - old_x;
+                                    let dy = client.geometry.y - old_y;
+                                    
+                                    if dx != 0 || dy != 0 {
+                                        // Move all transients by the same delta
+                                        let transients = self.wm.transient_manager.get_transients(window_id);
+                                        for transient_id in transients {
+                                            if let Some(transient_client) = self.wm_windows.get_mut(&transient_id) {
+                                                transient_client.geometry.x += dx;
+                                                transient_client.geometry.y += dy;
+                                                
+                                                // Apply to window
+                                                if let Some(frame) = &transient_client.frame {
+                                                    const TITLEBAR_HEIGHT: i32 = 32;
+                                                    let _ = self.conn.as_ref().configure_window(
+                                                        frame.frame,
+                                                        &x11rb::protocol::xproto::ConfigureWindowAux::new()
+                                                            .x(transient_client.geometry.x)
+                                                            .y(transient_client.geometry.y - TITLEBAR_HEIGHT),
+                                                    );
+                                                } else {
+                                                    let _ = self.conn.as_ref().configure_window(
+                                                        transient_client.window,
+                                                        &x11rb::protocol::xproto::ConfigureWindowAux::new()
+                                                            .x(transient_client.geometry.x)
+                                                            .y(transient_client.geometry.y),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1387,6 +1875,482 @@ impl AreaApp {
             
             Event::KeyPress(e) => {
                 debug!("KeyPress: detail={}, state={:?}", e.detail, e.state);
+                
+                // Check if keyboard move/resize is active - handle arrow keys and Enter/Escape
+                if let Some(ref state) = self.wm.move_resize_manager.state {
+                    if state.active && matches!(state.operation, crate::wm::moveresize::MoveResizeOperation::Keyboard) {
+                        // Handle arrow keys for keyboard move/resize
+                        // Arrow keycodes: Left=113, Right=114, Up=111, Down=116
+                        // Enter=36, Escape=9
+                        const KEYCODE_LEFT: u8 = 113;
+                        const KEYCODE_RIGHT: u8 = 114;
+                        const KEYCODE_UP: u8 = 111;
+                        const KEYCODE_DOWN: u8 = 116;
+                        const KEYCODE_ENTER: u8 = 36;
+                        const KEYCODE_ESCAPE: u8 = 9;
+                        const MOVE_STEP: i16 = 10; // Pixels per arrow key press
+                        const RESIZE_STEP: u32 = 10; // Pixels per arrow key press for resize
+                        
+                        // Determine if this is a move or resize operation
+                        let is_resize = if let Some(ref keyboard_op) = state.keyboard_operation {
+                            matches!(keyboard_op, crate::wm::moveresize::MoveResizeOperation::Resize(_))
+                        } else {
+                            false
+                        };
+                        
+                        match e.detail {
+                            KEYCODE_LEFT => {
+                                if let Some(client) = self.wm_windows.get_mut(&state.window) {
+                                    if is_resize {
+                                        // Resize: shrink width (or move left edge if resizing from left)
+                                        if let Some(crate::wm::moveresize::MoveResizeOperation::Resize(dir)) = state.keyboard_operation {
+                                            match dir {
+                                                crate::wm::moveresize::ResizeDirection::Left | 
+                                                crate::wm::moveresize::ResizeDirection::TopLeft | 
+                                                crate::wm::moveresize::ResizeDirection::BottomLeft => {
+                                                    // Move left edge: move x left and increase width
+                                                    client.geometry.x = (client.geometry.x - MOVE_STEP as i32).max(0);
+                                                    client.geometry.width = (client.geometry.width + RESIZE_STEP).min(self.wm.screen_info.work_area.width);
+                                                }
+                                                _ => {
+                                                    // Shrink width (right edge moves left)
+                                                    client.geometry.width = client.geometry.width.saturating_sub(RESIZE_STEP).max(100);
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // Move left
+                                        client.geometry.x = client.geometry.x.saturating_sub(MOVE_STEP as i32).max(0);
+                                    }
+                                    
+                                    // Apply to window
+                                    if let Some(frame) = &client.frame {
+                                        const TITLEBAR_HEIGHT: i32 = 32;
+                                        let mut aux = x11rb::protocol::xproto::ConfigureWindowAux::new()
+                                            .x(client.geometry.x)
+                                            .y(client.geometry.y - TITLEBAR_HEIGHT);
+                                        if is_resize {
+                                            aux = aux.width(client.geometry.width).height(client.geometry.height + TITLEBAR_HEIGHT as u32);
+                                        }
+                                        let _ = self.conn.as_ref().configure_window(frame.frame, &aux);
+                                    } else {
+                                        let mut aux = x11rb::protocol::xproto::ConfigureWindowAux::new()
+                                            .x(client.geometry.x)
+                                            .y(client.geometry.y);
+                                        if is_resize {
+                                            aux = aux.width(client.geometry.width).height(client.geometry.height);
+                                        }
+                                        let _ = self.conn.as_ref().configure_window(state.window, &aux);
+                                    }
+                                    self.conn.as_ref().flush().ok();
+                                }
+                                return Ok(());
+                            }
+                            KEYCODE_RIGHT => {
+                                if let Some(client) = self.wm_windows.get_mut(&state.window) {
+                                    if is_resize {
+                                        // Resize: increase width (right edge moves right)
+                                        if let Some(crate::wm::moveresize::MoveResizeOperation::Resize(dir)) = state.keyboard_operation {
+                                            match dir {
+                                                crate::wm::moveresize::ResizeDirection::Left | 
+                                                crate::wm::moveresize::ResizeDirection::TopLeft | 
+                                                crate::wm::moveresize::ResizeDirection::BottomLeft => {
+                                                    // Move left edge right: move x right and decrease width
+                                                    client.geometry.x = (client.geometry.x + MOVE_STEP as i32).min(
+                                                        (self.wm.screen_info.work_area.x + self.wm.screen_info.work_area.width as i32 - client.geometry.width as i32)
+                                                    );
+                                                    client.geometry.width = client.geometry.width.saturating_sub(RESIZE_STEP).max(100);
+                                                }
+                                                _ => {
+                                                    // Increase width
+                                                    client.geometry.width = (client.geometry.width + RESIZE_STEP).min(
+                                                        (self.wm.screen_info.work_area.x + self.wm.screen_info.work_area.width as i32 - client.geometry.x) as u32
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // Move right
+                                        client.geometry.x = (client.geometry.x + MOVE_STEP as i32).min(
+                                            (self.wm.screen_info.work_area.x + self.wm.screen_info.work_area.width as i32 - client.geometry.width as i32)
+                                        );
+                                    }
+                                    
+                                    // Apply to window
+                                    if let Some(frame) = &client.frame {
+                                        const TITLEBAR_HEIGHT: i32 = 32;
+                                        let mut aux = x11rb::protocol::xproto::ConfigureWindowAux::new()
+                                            .x(client.geometry.x)
+                                            .y(client.geometry.y - TITLEBAR_HEIGHT);
+                                        if is_resize {
+                                            aux = aux.width(client.geometry.width).height(client.geometry.height + TITLEBAR_HEIGHT as u32);
+                                        }
+                                        let _ = self.conn.as_ref().configure_window(frame.frame, &aux);
+                                    } else {
+                                        let mut aux = x11rb::protocol::xproto::ConfigureWindowAux::new()
+                                            .x(client.geometry.x)
+                                            .y(client.geometry.y);
+                                        if is_resize {
+                                            aux = aux.width(client.geometry.width).height(client.geometry.height);
+                                        }
+                                        let _ = self.conn.as_ref().configure_window(state.window, &aux);
+                                    }
+                                    self.conn.as_ref().flush().ok();
+                                }
+                                return Ok(());
+                            }
+                            KEYCODE_UP => {
+                                if let Some(client) = self.wm_windows.get_mut(&state.window) {
+                                    if is_resize {
+                                        // Resize: shrink height (or move top edge if resizing from top)
+                                        if let Some(crate::wm::moveresize::MoveResizeOperation::Resize(dir)) = state.keyboard_operation {
+                                            match dir {
+                                                crate::wm::moveresize::ResizeDirection::Top | 
+                                                crate::wm::moveresize::ResizeDirection::TopLeft | 
+                                                crate::wm::moveresize::ResizeDirection::TopRight => {
+                                                    // Move top edge: move y up and increase height
+                                                    client.geometry.y = (client.geometry.y - MOVE_STEP as i32).max(0);
+                                                    client.geometry.height = (client.geometry.height + RESIZE_STEP).min(self.wm.screen_info.work_area.height);
+                                                }
+                                                _ => {
+                                                    // Shrink height (bottom edge moves up)
+                                                    client.geometry.height = client.geometry.height.saturating_sub(RESIZE_STEP).max(100);
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // Move up
+                                        client.geometry.y = client.geometry.y.saturating_sub(MOVE_STEP as i32).max(0);
+                                    }
+                                    
+                                    // Apply to window
+                                    if let Some(frame) = &client.frame {
+                                        const TITLEBAR_HEIGHT: i32 = 32;
+                                        let mut aux = x11rb::protocol::xproto::ConfigureWindowAux::new()
+                                            .x(client.geometry.x)
+                                            .y(client.geometry.y - TITLEBAR_HEIGHT);
+                                        if is_resize {
+                                            aux = aux.width(client.geometry.width).height(client.geometry.height + TITLEBAR_HEIGHT as u32);
+                                        }
+                                        let _ = self.conn.as_ref().configure_window(frame.frame, &aux);
+                                    } else {
+                                        let mut aux = x11rb::protocol::xproto::ConfigureWindowAux::new()
+                                            .x(client.geometry.x)
+                                            .y(client.geometry.y);
+                                        if is_resize {
+                                            aux = aux.width(client.geometry.width).height(client.geometry.height);
+                                        }
+                                        let _ = self.conn.as_ref().configure_window(state.window, &aux);
+                                    }
+                                    self.conn.as_ref().flush().ok();
+                                }
+                                return Ok(());
+                            }
+                            KEYCODE_DOWN => {
+                                if let Some(client) = self.wm_windows.get_mut(&state.window) {
+                                    if is_resize {
+                                        // Resize: increase height (bottom edge moves down)
+                                        if let Some(crate::wm::moveresize::MoveResizeOperation::Resize(dir)) = state.keyboard_operation {
+                                            match dir {
+                                                crate::wm::moveresize::ResizeDirection::Top | 
+                                                crate::wm::moveresize::ResizeDirection::TopLeft | 
+                                                crate::wm::moveresize::ResizeDirection::TopRight => {
+                                                    // Move top edge down: move y down and decrease height
+                                                    client.geometry.y = (client.geometry.y + MOVE_STEP as i32).min(
+                                                        (self.wm.screen_info.work_area.y + self.wm.screen_info.work_area.height as i32 - client.geometry.height as i32)
+                                                    );
+                                                    client.geometry.height = client.geometry.height.saturating_sub(RESIZE_STEP).max(100);
+                                                }
+                                                _ => {
+                                                    // Increase height
+                                                    client.geometry.height = (client.geometry.height + RESIZE_STEP).min(
+                                                        (self.wm.screen_info.work_area.y + self.wm.screen_info.work_area.height as i32 - client.geometry.y) as u32
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // Move down
+                                        client.geometry.y = (client.geometry.y + MOVE_STEP as i32).min(
+                                            (self.wm.screen_info.work_area.y + self.wm.screen_info.work_area.height as i32 - client.geometry.height as i32)
+                                        );
+                                    }
+                                    
+                                    // Apply to window
+                                    if let Some(frame) = &client.frame {
+                                        const TITLEBAR_HEIGHT: i32 = 32;
+                                        let mut aux = x11rb::protocol::xproto::ConfigureWindowAux::new()
+                                            .x(client.geometry.x)
+                                            .y(client.geometry.y - TITLEBAR_HEIGHT);
+                                        if is_resize {
+                                            aux = aux.width(client.geometry.width).height(client.geometry.height + TITLEBAR_HEIGHT as u32);
+                                        }
+                                        let _ = self.conn.as_ref().configure_window(frame.frame, &aux);
+                                    } else {
+                                        let mut aux = x11rb::protocol::xproto::ConfigureWindowAux::new()
+                                            .x(client.geometry.x)
+                                            .y(client.geometry.y);
+                                        if is_resize {
+                                            aux = aux.width(client.geometry.width).height(client.geometry.height);
+                                        }
+                                        let _ = self.conn.as_ref().configure_window(state.window, &aux);
+                                    }
+                                    self.conn.as_ref().flush().ok();
+                                }
+                                return Ok(());
+                            }
+                            KEYCODE_ENTER => {
+                                // Finish keyboard move/resize
+                                if let Err(err) = self.wm.move_resize_manager.finish(
+                                    &self.conn,
+                                    &self.wm.display_info,
+                                    &self.wm.screen_info,
+                                ) {
+                                    warn!("Failed to finish keyboard move/resize: {}", err);
+                                }
+                                return Ok(());
+                            }
+                            KEYCODE_ESCAPE => {
+                                // Cancel keyboard move/resize (restore original position)
+                                if let Some(ref state) = self.wm.move_resize_manager.state.clone() {
+                                    if let Some(client) = self.wm_windows.get_mut(&state.window) {
+                                        // Restore original geometry
+                                        client.geometry = state.start_geometry.clone();
+                                        // Apply to window
+                                        if let Some(frame) = &client.frame {
+                                            const TITLEBAR_HEIGHT: i32 = 32;
+                                            let _ = self.conn.as_ref().configure_window(
+                                                frame.frame,
+                                                &x11rb::protocol::xproto::ConfigureWindowAux::new()
+                                                    .x(state.start_geometry.x)
+                                                    .y(state.start_geometry.y - TITLEBAR_HEIGHT),
+                                            );
+                                        } else {
+                                            let _ = self.conn.as_ref().configure_window(
+                                                state.window,
+                                                &x11rb::protocol::xproto::ConfigureWindowAux::new()
+                                                    .x(state.start_geometry.x)
+                                                    .y(state.start_geometry.y),
+                                            );
+                                        }
+                                        self.conn.as_ref().flush().ok();
+                                    }
+                                }
+                                // Finish operation
+                                if let Err(err) = self.wm.move_resize_manager.finish(
+                                    &self.conn,
+                                    &self.wm.display_info,
+                                    &self.wm.screen_info,
+                                ) {
+                                    warn!("Failed to finish keyboard move/resize: {}", err);
+                                }
+                                return Ok(());
+                            }
+                            _ => {
+                                // Not an arrow key or Enter/Escape, continue to normal key handling
+                            }
+                        }
+                    }
+                }
+                
+                // Try keyboard manager first
+                let modifiers = u16::from(e.state);
+                if let Some(action) = self.wm.keyboard_manager.handle_key_press(modifiers, e.detail) {
+                    debug!("Keyboard action: {:?}", action);
+                    match action {
+                        crate::wm::keyboard::KeyboardAction::CloseWindow => {
+                            // Close focused window
+                            if let Some(focused) = self.wm.focus_manager.focused_window {
+                                if let Err(err) = self.wm.close_window(&self.conn, focused) {
+                                    warn!("Failed to close window {}: {}", focused, err);
+                                }
+                            }
+                        }
+                        crate::wm::keyboard::KeyboardAction::MaximizeWindow => {
+                            // Toggle maximize on focused window
+                            if let Some(focused) = self.wm.focus_manager.focused_window {
+                                if let Err(err) = self.wm.toggle_maximize(&self.conn, &mut self.wm_windows, focused) {
+                                    warn!("Failed to toggle maximize window {}: {}", focused, err);
+                                }
+                            }
+                        }
+                        crate::wm::keyboard::KeyboardAction::MinimizeWindow => {
+                            // Minimize focused window
+                            if let Some(focused) = self.wm.focus_manager.focused_window {
+                                if let Err(err) = self.wm.minimize_window(&self.conn, &mut self.wm_windows, focused) {
+                                    warn!("Failed to minimize window {}: {}", focused, err);
+                                }
+                            }
+                        }
+                        crate::wm::keyboard::KeyboardAction::SwitchWorkspace(workspace) => {
+                            // Handle special workspace values for arrow keys:
+                            // 0 = previous, 1 = next, 2 = up, 3 = down
+                            let target_workspace = if workspace < 4 {
+                                let current = self.wm.workspace_manager.current_workspace;
+                                let count = self.wm.workspace_manager.workspace_count;
+                                match workspace {
+                                    0 => {
+                                        // Previous workspace
+                                        if current == 0 {
+                                            count - 1 // Wrap to last
+                                        } else {
+                                            current - 1
+                                        }
+                                    }
+                                    1 => {
+                                        // Next workspace
+                                        (current + 1) % count
+                                    }
+                                    2 => {
+                                        // Up workspace (for vertical layouts, same as previous for now)
+                                        if current == 0 {
+                                            count - 1
+                                        } else {
+                                            current - 1
+                                        }
+                                    }
+                                    3 => {
+                                        // Down workspace (for vertical layouts, same as next for now)
+                                        (current + 1) % count
+                                    }
+                                    _ => workspace,
+                                }
+                            } else {
+                                workspace
+                            };
+                            
+                            if let Err(err) = self.wm.workspace_manager.switch_workspace(
+                                &self.conn,
+                                &self.wm.display_info,
+                                &self.wm.screen_info,
+                                target_workspace,
+                                &mut self.wm_windows,
+                            ) {
+                                warn!("Failed to switch workspace: {}", err);
+                            }
+                        }
+                        crate::wm::keyboard::KeyboardAction::CycleWindows => {
+                            // Start cycle if not active, otherwise cycle to next
+                            if !self.wm.cycle_manager.active {
+                                if let Err(err) = self.wm.cycle_manager.start_cycle(
+                                    &self.conn,
+                                    &self.wm.display_info,
+                                    &self.wm.screen_info,
+                                    &self.wm.focus_manager,
+                                    &self.wm_windows,
+                                    crate::wm::cycle::CycleMode::CurrentWorkspace,
+                                ) {
+                                    warn!("Failed to start window cycle: {}", err);
+                                }
+                            } else {
+                                if let Err(err) = self.wm.cycle_manager.cycle_next(
+                                    &self.conn,
+                                    &self.wm.display_info,
+                                    &self.wm.screen_info,
+                                    &mut self.wm.focus_manager,
+                                    &mut self.wm_windows,
+                                ) {
+                                    warn!("Failed to cycle to next window: {}", err);
+                                }
+                            }
+                        }
+                        crate::wm::keyboard::KeyboardAction::CycleWindowsPrev => {
+                            // Start cycle if not active, otherwise cycle to previous
+                            if !self.wm.cycle_manager.active {
+                                if let Err(err) = self.wm.cycle_manager.start_cycle(
+                                    &self.conn,
+                                    &self.wm.display_info,
+                                    &self.wm.screen_info,
+                                    &self.wm.focus_manager,
+                                    &self.wm_windows,
+                                    crate::wm::cycle::CycleMode::CurrentWorkspace,
+                                ) {
+                                    warn!("Failed to start window cycle: {}", err);
+                                }
+                                // For reverse cycle, start at the end
+                                if !self.wm.cycle_manager.cycle_list.is_empty() {
+                                    self.wm.cycle_manager.cycle_index = 
+                                        self.wm.cycle_manager.cycle_list.len() - 1;
+                                }
+                            } else {
+                                if let Err(err) = self.wm.cycle_manager.cycle_prev(
+                                    &self.conn,
+                                    &self.wm.display_info,
+                                    &self.wm.screen_info,
+                                    &mut self.wm.focus_manager,
+                                    &mut self.wm_windows,
+                                ) {
+                                    warn!("Failed to cycle to previous window: {}", err);
+                                }
+                            }
+                        }
+                        crate::wm::keyboard::KeyboardAction::MoveWindow => {
+                            // Start move operation on focused window
+                            if let Some(focused) = self.wm.focus_manager.focused_window {
+                                if let Some(client) = self.wm_windows.get(&focused) {
+                                    // Get current pointer position for move start
+                                    if let Ok(pointer) = self.conn.as_ref().query_pointer(self.root)?.reply() {
+                                        // Set operation to Keyboard mode
+                                        if let Err(err) = self.wm.move_resize_manager.start_move(
+                                            &self.conn,
+                                            &self.wm.display_info,
+                                            &self.wm.screen_info,
+                                            focused,
+                                            pointer.root_x,
+                                            pointer.root_y,
+                                            client,
+                                        ) {
+                                            warn!("Failed to start move for window {}: {}", focused, err);
+                                        } else {
+                                            // Change operation to Keyboard mode and store original operation
+                                            if let Some(ref mut state) = self.wm.move_resize_manager.state {
+                                                state.keyboard_operation = Some(crate::wm::moveresize::MoveResizeOperation::Move);
+                                                state.operation = crate::wm::moveresize::MoveResizeOperation::Keyboard;
+                                            }
+                                            debug!("Keyboard move started for window {} (Alt+F7)", focused);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        crate::wm::keyboard::KeyboardAction::ResizeWindow => {
+                            // Start resize operation on focused window
+                            // Resize from bottom-right corner (default for keyboard resize)
+                            if let Some(focused) = self.wm.focus_manager.focused_window {
+                                if let Some(client) = self.wm_windows.get(&focused) {
+                                    // Get current pointer position for resize start
+                                    if let Ok(pointer) = self.conn.as_ref().query_pointer(self.root)?.reply() {
+                                        if let Err(err) = self.wm.move_resize_manager.start_resize(
+                                            &self.conn,
+                                            &self.wm.display_info,
+                                            &self.wm.screen_info,
+                                            focused,
+                                            pointer.root_x,
+                                            pointer.root_y,
+                                            crate::wm::moveresize::ResizeDirection::BottomRight,
+                                            client,
+                                        ) {
+                                            warn!("Failed to start resize for window {}: {}", focused, err);
+                                        } else {
+                                            // Change operation to Keyboard mode and store original operation
+                                            if let Some(ref mut state) = self.wm.move_resize_manager.state {
+                                                state.keyboard_operation = Some(crate::wm::moveresize::MoveResizeOperation::Resize(crate::wm::moveresize::ResizeDirection::BottomRight));
+                                                state.operation = crate::wm::moveresize::MoveResizeOperation::Keyboard;
+                                            }
+                                            debug!("Keyboard resize started for window {} (Alt+F8)", focused);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            debug!("Unhandled keyboard action: {:?}", action);
+                        }
+                    }
+                    return Ok(());
+                }
+                
+                // Fallback to launcher key handling
                 // Check for launcher key from config
                 // For now, support keycode-based matching (133/134 for SUPER keys)
                 // TODO: Add full keybinding parser for key names like "Super"
@@ -1413,6 +2377,22 @@ impl AreaApp {
                         cmd.env("XAUTHORITY", xauth);
                     }
                     let _ = cmd.spawn();
+                }
+            }
+            
+            Event::KeyRelease(e) => {
+                debug!("KeyRelease: detail={}, state={:?}", e.detail, e.state);
+                
+                // Check if cycle is active and Alt (Mod1) is being released
+                if self.wm.cycle_manager.active {
+                    let modifiers = u16::from(e.state);
+                    let mod1_mask = self.wm.keyboard_manager.mod_map.mod1;
+                    
+                    // If Mod1 is no longer pressed (not in state), finish the cycle
+                    if (modifiers & mod1_mask) == 0 {
+                        debug!("Alt released, finishing cycle");
+                        self.wm.cycle_manager.finish_cycle();
+                    }
                 }
             }
             
@@ -1468,6 +2448,67 @@ impl AreaApp {
                     }
                 }
                 
+                // Check if _NET_WM_NAME changed (window title)
+                if e.atom == self.wm.atoms.net_wm_name {
+                    debug!("PropertyNotify: _NET_WM_NAME changed for window {}", e.window);
+                    if let Some(client_id) = self.wm.find_client_from_window(&self.wm_windows, e.window) {
+                        if let Some(client) = self.wm_windows.get_mut(&client_id) {
+                            // Read new title
+                            if let Ok(reply) = self.conn.as_ref().get_property(
+                                false,
+                                e.window,
+                                self.wm.atoms.net_wm_name,
+                                self.wm.atoms._utf8_string,
+                                0,
+                                1024,
+                            )?.reply() {
+                                if let Ok(title) = String::from_utf8(reply.value) {
+                                    client.name = title.trim_end_matches('\0').to_string();
+                                    debug!("Updated window title for {} to: {}", client_id, client.title());
+                                    // Update titlebar text if frame exists
+                                    if let Some(frame) = &client.frame {
+                                        if let Err(e) = frame.update_title(&self.conn, &client.title()) {
+                                            debug!("Failed to update titlebar text for window {}: {}", client_id, e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Check if _NET_WM_DESKTOP changed (workspace assignment)
+                if e.atom == self.wm.atoms.net_wm_desktop {
+                    debug!("PropertyNotify: _NET_WM_DESKTOP changed for window {}", e.window);
+                    if let Some(client_id) = self.wm.find_client_from_window(&self.wm_windows, e.window) {
+                        if let Ok(desktop_prop) = self.conn.as_ref().get_property(
+                            false,
+                            e.window,
+                            self.wm.atoms.net_wm_desktop,
+                            x11rb::protocol::xproto::AtomEnum::CARDINAL,
+                            0,
+                            1,
+                        )?.reply() {
+                            if let Some(mut value32) = desktop_prop.value32() {
+                                let workspace = value32.next().unwrap_or(0);
+                                let window_id = client_id;
+                                // Move window to workspace - use window_id to avoid borrow issues
+                                if let Err(err) = self.wm.workspace_manager.move_window_to_workspace_by_id(
+                                    &self.conn,
+                                    &self.wm.display_info,
+                                    &self.wm.screen_info,
+                                    window_id,
+                                    workspace,
+                                    &self.wm.transient_manager,
+                                    &mut self.wm_windows,
+                                ) {
+                                    warn!("Failed to move window {} to workspace {}: {}", window_id, workspace, err);
+                                }
+                            }
+                        }
+                    }
+                }
+                
                 // Check if _NET_WM_BYPASS_COMPOSITOR changed
                 if e.atom == self.wm.atoms._net_wm_bypass_compositor {
                     if let Some(client) = self.wm_windows.get(&e.window) {
@@ -1479,6 +2520,218 @@ impl AreaApp {
                             } else {
                                 debug!("PropertyNotify: _NET_WM_BYPASS_COMPOSITOR cleared for window {}, redirecting", e.window);
                                 self.compositor.redirect_window(composite_id);
+                            }
+                        }
+                    }
+                }
+                
+                // Check if _NET_WM_ICON changed (window icon)
+                if e.atom == self.wm.atoms._net_wm_icon {
+                    debug!("PropertyNotify: _NET_WM_ICON changed for window {}", e.window);
+                    if let Some(client_id) = self.wm.find_client_from_window(&self.wm_windows, e.window) {
+                        // Remove old icon from cache
+                        self.wm.icon_manager.remove_icon(client_id);
+                        // Reload icon
+                        if let Err(e) = self.wm.icon_manager.load_icon(
+                            &self.conn,
+                            &self.wm.display_info.atoms,
+                            client_id,
+                        ) {
+                            debug!("Failed to reload icon for window {}: {}", client_id, e);
+                        } else {
+                            debug!("Reloaded icon for window {}", client_id);
+                        }
+                    }
+                }
+                
+                // Check if _NET_WM_STRUT or _NET_WM_STRUT_PARTIAL changed (work area recalculation)
+                if e.atom == self.wm.atoms._net_wm_strut || e.atom == self.wm.atoms._net_wm_strut_partial {
+                    debug!("PropertyNotify: _NET_WM_STRUT changed for window {}", e.window);
+                    // Check if window has strut property (non-zero)
+                    let has_strut = if let Ok(reply) = self.conn.as_ref().get_property(
+                        false,
+                        e.window,
+                        self.wm.atoms._net_wm_strut_partial,
+                        x11rb::protocol::xproto::AtomEnum::CARDINAL,
+                        0,
+                        4,
+                    )?.reply() {
+                        if let Some(mut value32) = reply.value32() {
+                            value32.any(|v| v > 0)
+                        } else {
+                            false
+                        }
+                    } else if let Ok(reply) = self.conn.as_ref().get_property(
+                        false,
+                        e.window,
+                        self.wm.atoms._net_wm_strut,
+                        x11rb::protocol::xproto::AtomEnum::CARDINAL,
+                        0,
+                        4,
+                    )?.reply() {
+                        if let Some(mut value32) = reply.value32() {
+                            value32.any(|v| v > 0)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    
+                    // Get mutable access to screen_info (only works if there's a single reference)
+                    // In practice, this should work since we own the WindowManager
+                    if let Some(screen_info) = Arc::get_mut(&mut self.wm.screen_info) {
+                        if has_strut {
+                            // Add to strut windows set
+                            screen_info.strut_windows.insert(e.window);
+                        } else {
+                            // Remove from strut windows set
+                            screen_info.strut_windows.remove(&e.window);
+                        }
+                        
+                        // Recalculate work area
+                        if let Err(e) = screen_info.update_work_area_from_struts(
+                            &self.conn,
+                            &self.wm.atoms,
+                            &self.wm_windows,
+                        ) {
+                            warn!("Failed to update work area from struts: {}", e);
+                        }
+                        let root = screen_info.root;
+                        let work_area = screen_info.work_area.clone();
+                        if let Err(e) = self.wm.atoms.update_workarea(&self.conn, root, &work_area) {
+                            warn!("Failed to update _NET_WORKAREA: {}", e);
+                        }
+                    } else {
+                        warn!("Cannot get mutable access to screen_info (multiple references)");
+                    }
+                }
+                
+                // Check if _NET_STARTUP_ID changed (startup notification)
+                if e.atom == self.wm.atoms._net_startup_id {
+                    debug!("PropertyNotify: _NET_STARTUP_ID changed for window {}", e.window);
+                    if let Some(client_id) = self.wm.find_client_from_window(&self.wm_windows, e.window) {
+                        // Read _NET_STARTUP_ID and register if present
+                        if let Ok(reply) = self.conn.as_ref().get_property(
+                            false,
+                            e.window,
+                            self.wm.atoms._net_startup_id,
+                            self.wm.atoms._utf8_string,
+                            0,
+                            1024,
+                        )?.reply() {
+                            if let Ok(startup_id_str) = String::from_utf8(reply.value) {
+                                let startup_id = startup_id_str.trim_end_matches('\0').to_string();
+                                if !startup_id.is_empty() {
+                                    // Register startup notification if it doesn't exist
+                                    if !self.wm.startup_manager.notifications.contains_key(&startup_id) {
+                                        self.wm.startup_manager.register_startup(startup_id.clone(), e.time);
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if let Err(e) = self.wm.startup_manager.associate_window(
+                            &self.conn,
+                            &self.wm.display_info.atoms,
+                            client_id,
+                        ) {
+                            debug!("Failed to associate startup notification for window {}: {}", client_id, e);
+                        }
+                        
+                        // Update busy cursor based on startup state
+                        let _ = self.update_startup_cursor();
+                    }
+                }
+                
+                // Check if WM_TRANSIENT_FOR changed (transient relationship)
+                // Intern the atom to compare (WM_TRANSIENT_FOR is a standard atom)
+                if let Ok(reply) = self.conn.as_ref().intern_atom(false, b"WM_TRANSIENT_FOR")?.reply() {
+                    if e.atom == reply.atom {
+                        debug!("PropertyNotify: WM_TRANSIENT_FOR changed for window {}", e.window);
+                        if let Some(client_id) = self.wm.find_client_from_window(&self.wm_windows, e.window) {
+                            // Read WM_TRANSIENT_FOR property
+                            if let Ok(reply) = self.conn.as_ref().get_property(
+                                false,
+                                e.window,
+                                x11rb::protocol::xproto::AtomEnum::WM_TRANSIENT_FOR,
+                                x11rb::protocol::xproto::AtomEnum::WINDOW,
+                                0,
+                                1,
+                            )?.reply() {
+                                if let Some(mut value32) = reply.value32() {
+                                    let transient_for = value32.next();
+                                    if let Some(client) = self.wm_windows.get_mut(&client_id) {
+                                        if let Some(parent) = transient_for {
+                                            if parent != 0 {
+                                                // Update transient relationship
+                                                self.wm.transient_manager.set_transient_for(client.window, Some(parent));
+                                                client.transient_for = Some(parent);
+                                                debug!("Updated transient relationship: window {} is transient for {}", client_id, parent);
+                                            } else {
+                                                // Clear transient relationship
+                                                self.wm.transient_manager.set_transient_for(client.window, None);
+                                                client.transient_for = None;
+                                                debug!("Cleared transient relationship for window {}", client_id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Check if WM_HINTS changed (window hints like input hint, initial_state)
+                if e.atom == self.wm.atoms._wm_hints {
+                    debug!("PropertyNotify: WM_HINTS changed for window {}", e.window);
+                    if let Some(client_id) = self.wm.find_client_from_window(&self.wm_windows, e.window) {
+                        // Read WM_HINTS property
+                        if let Ok(Some(wm_hints)) = crate::wm::hints::HintsManager::read_wm_hints(
+                            &self.conn,
+                            &self.wm.display_info.atoms,
+                            client_id,
+                        ) {
+                            debug!("Updated WM_HINTS for window {}: input={}, initial_state={}, urgent={}", 
+                                client_id, wm_hints.input, wm_hints.initial_state, wm_hints.is_urgent());
+                            
+                            // Update client's WM_HINTS and handle urgency
+                            if let Some(client) = self.wm_windows.get_mut(&client_id) {
+                                client.wm_hints = Some(crate::wm::client::WmHints {
+                                    flags: wm_hints.flags,
+                                    input: wm_hints.input,
+                                    initial_state: wm_hints.initial_state,
+                                    icon_pixmap: wm_hints.icon_pixmap,
+                                    icon_window: wm_hints.icon_window,
+                                    icon_x: wm_hints.icon_x,
+                                    icon_y: wm_hints.icon_y,
+                                    icon_mask: wm_hints.icon_mask,
+                                    window_group: wm_hints.window_group,
+                                });
+                                
+                                // Handle urgency hint
+                                if wm_hints.is_urgent() {
+                                    debug!("Window {} has urgency hint, setting DEMANDS_ATTENTION", client_id);
+                                    client.flags.insert(crate::wm::client_flags::ClientFlags::DEMANDS_ATTENTION);
+                                    // Set _NET_WM_STATE_DEMANDS_ATTENTION
+                                    self.wm.atoms.set_window_state(
+                                        &self.conn,
+                                        client.window,
+                                        &[self.wm.atoms._net_wm_state_demands_attention],
+                                        &[],
+                                    )?;
+                                } else {
+                                    // Remove urgency if no longer urgent
+                                    if client.flags.contains(crate::wm::client_flags::ClientFlags::DEMANDS_ATTENTION) {
+                                        client.flags.remove(crate::wm::client_flags::ClientFlags::DEMANDS_ATTENTION);
+                                        self.wm.atoms.set_window_state(
+                                            &self.conn,
+                                            client.window,
+                                            &[],
+                                            &[self.wm.atoms._net_wm_state_demands_attention],
+                                        )?;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1495,15 +2748,33 @@ impl AreaApp {
                 let client_id = self.wm.find_client_from_window(&self.wm_windows, window_id);
                 
                 if let Some(cid) = client_id {
-                    if let Some(client) = self.wm_windows.get(&cid) {
+                    if let Some(client) = self.wm_windows.get_mut(&cid) {
                         info!("🎯 FocusIn: window={} (client={}), detail={}, mode={}, title='{}', focused={}", 
                             window_id, cid, detail, mode, client.title(), client.focused());
                         
-                        // Update focus state if needed
+                        // Update focus state if needed - use FocusManager
                         if !client.focused() {
                             debug!("Window {} gained focus but wasn't marked as focused, updating state", cid);
-                            if let Err(err) = self.wm.set_focus(&self.conn, &mut self.wm_windows, cid) {
+                            if let Err(err) = self.wm.focus_manager.set_focus(
+                                &self.conn,
+                                &self.wm.display_info,
+                                &self.wm.screen_info,
+                                client,
+                                crate::wm::focus::FocusSource::Other,
+                            ) {
                                 warn!("Failed to set focus for window {}: {}", cid, err);
+                            } else {
+                                // Raise window using StackingManager (with transients)
+                                if let Err(err) = self.wm.stacking_manager.raise_window_with_transients(
+                                    &self.conn,
+                                    &self.wm.display_info,
+                                    &self.wm.screen_info,
+                                    client.window,
+                                    &self.wm_windows,
+                                    &self.wm.transient_manager.transients,
+                                ) {
+                                    warn!("Failed to raise window {}: {}", cid, err);
+                                }
                             }
                         }
                     } else {
@@ -1535,11 +2806,16 @@ impl AreaApp {
                         info!("🎯 FocusOut: window={} (client={}), detail={}, mode={}, title='{}', was_focused={}", 
                             window_id, cid, detail, mode, client.title(), client.focused());
                         
-                        // Clear focus if this window had it
+                        // Clear focus if this window had it - use FocusManager
                         if client.focused() {
                             debug!("Window {} lost focus, clearing focus state", cid);
-                            if let Some(client) = self.wm_windows.get_mut(&cid) {
-                                client.set_focused(false);
+                            if let Err(err) = self.wm.focus_manager.remove_focus(
+                                &self.conn,
+                                &self.wm.display_info,
+                                &self.wm.screen_info,
+                                window_id,
+                            ) {
+                                warn!("Failed to remove focus from window {}: {}", cid, err);
                             }
                         }
                     } else {
@@ -1640,6 +2916,94 @@ impl AreaApp {
         // #endregion
         
         manage_result?;
+        
+        // Load window icon
+        if let Err(e) = self.wm.icon_manager.load_icon(
+            &self.conn,
+            &self.wm.display_info.atoms,
+            window_id,
+        ) {
+            debug!("Failed to load icon for window {}: {}", window_id, e);
+        }
+        
+        // Check for startup notification ID and register/associate
+        // First, try to read _NET_STARTUP_ID to register the startup
+        if let Ok(reply) = self.conn.as_ref().get_property(
+            false,
+            window_id,
+            self.wm.atoms._net_startup_id,
+            self.wm.atoms._utf8_string,
+            0,
+            1024,
+        )?.reply() {
+            if let Ok(startup_id_str) = String::from_utf8(reply.value) {
+                let startup_id = startup_id_str.trim_end_matches('\0').to_string();
+                if !startup_id.is_empty() {
+                    // Register startup notification if it doesn't exist
+                    if !self.wm.startup_manager.notifications.contains_key(&startup_id) {
+                        self.wm.startup_manager.register_startup(startup_id.clone(), x11rb::CURRENT_TIME);
+                    }
+                }
+            }
+        }
+        
+        // Associate window with startup notification
+        if let Err(e) = self.wm.startup_manager.associate_window(
+            &self.conn,
+            &self.wm.display_info.atoms,
+            window_id,
+        ) {
+            debug!("Failed to associate startup notification for window {}: {}", window_id, e);
+        }
+        
+        // Update busy cursor based on startup state
+        let _ = self.update_startup_cursor();
+        
+        // Apply window placement policy
+        let placement_policy = self.wm.settings_manager.get_settings().placement_policy;
+        self.wm.placement_manager.policy = placement_policy;
+        
+        // Get mouse position for mouse placement policy
+        let (mouse_x, mouse_y) = if placement_policy == crate::wm::placement::PlacementPolicy::Mouse {
+            if let Ok(pointer) = self.conn.as_ref().query_pointer(self.root)?.reply() {
+                (Some(pointer.root_x), Some(pointer.root_y))
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+        
+        // Apply placement algorithm
+        if let Ok(placed_geometry) = self.wm.placement_manager.place_window(
+            &self.conn,
+            &self.wm.screen_info,
+            &mut client,
+            mouse_x,
+            mouse_y,
+            &self.wm_windows,
+        ) {
+            // Update client geometry with placed position
+            client.geometry.x = placed_geometry.x;
+            client.geometry.y = placed_geometry.y;
+            
+            // Configure window to placed position
+            if let Some(frame) = &client.frame {
+                self.conn.as_ref().configure_window(
+                    frame.frame,
+                    &x11rb::protocol::xproto::ConfigureWindowAux::new()
+                        .x(placed_geometry.x)
+                        .y(placed_geometry.y),
+                )?;
+            } else {
+                self.conn.as_ref().configure_window(
+                    window_id,
+                    &x11rb::protocol::xproto::ConfigureWindowAux::new()
+                        .x(placed_geometry.x)
+                        .y(placed_geometry.y),
+                )?;
+            }
+        }
         
         // Register frame windows to prevent recursive management
         if let Some(frame) = &client.frame {
@@ -1832,6 +3196,11 @@ impl AreaApp {
         
         if let Some(client_id) = client_id {
             debug!("DestroyNotify for client window {} - cleaning up", client_id);
+            
+            // Mark window as responsive (responded to WM_DELETE_WINDOW by being destroyed)
+            self.wm.terminate_manager.check_delete_response(client_id, x11rb::CURRENT_TIME);
+            self.wm.terminate_manager.mark_responsive(client_id);
+            
             // Use handle_unmap for proper cleanup
             self.handle_unmap(client_id)?;
         } else {
@@ -1860,6 +3229,11 @@ impl AreaApp {
             self.reparenting_windows.remove(&window_id);
             return Ok(());
         }
+        
+        // Mark window as responsive if it was pending WM_DELETE_WINDOW response
+        // (window responded by unmapping itself)
+        self.wm.terminate_manager.check_delete_response(window_id, x11rb::CURRENT_TIME);
+        self.wm.terminate_manager.mark_responsive(window_id);
         
         if let Some(mut client) = self.wm_windows.remove(&window_id) {
             // Track this window as being unmanaged (reparented back to root)
@@ -1893,6 +3267,33 @@ impl AreaApp {
     }
     
     // render_frame is removed, rendering is now managed by the compositor thread actor
+    
+    /// Update busy cursor on root window based on startup notification state
+    fn update_startup_cursor(&mut self) -> Result<()> {
+        let has_active = self.wm.startup_manager.has_active_startup();
+        let cursor_id = if has_active {
+            // Show busy cursor if available
+            self.wm.startup_manager.get_busy_cursor().unwrap_or(0)
+        } else {
+            // Show normal cursor (0 = default/none)
+            0
+        };
+        
+        // Set cursor on root window
+        // Note: Cursor 0 means use parent cursor (default)
+        // If busy cursor is 0, we're effectively showing normal cursor
+        // In a full implementation, we'd want to store the normal cursor and restore it
+        if cursor_id != 0 {
+            use x11rb::protocol::xproto::ChangeWindowAttributesAux;
+            self.conn.as_ref().change_window_attributes(
+                self.root,
+                &ChangeWindowAttributesAux::new().cursor(cursor_id),
+            )?;
+            self.conn.as_ref().flush()?;
+        }
+        
+        Ok(())
+    }
 }
 
 #[tokio::main]

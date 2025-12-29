@@ -280,6 +280,7 @@ impl WindowFrame {
         Ok(())
     }
 
+
     /// Destroy the frame and unparent the client
     pub fn destroy(&self, conn: &RustConnection, root: Window) -> Result<()> {
         conn.reparent_window(self.client, root, 0, 0)?;

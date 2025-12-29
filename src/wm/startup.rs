@@ -49,6 +49,21 @@ impl StartupNotificationManager {
         }
     }
     
+    /// Set busy cursor from DisplayInfo
+    pub fn set_busy_cursor(&mut self, cursor_id: u32) {
+        self.busy_cursor = Some(cursor_id);
+    }
+    
+    /// Check if any startup notification is active
+    pub fn has_active_startup(&self) -> bool {
+        self.notifications.values().any(|n| !n.complete)
+    }
+    
+    /// Get busy cursor ID (if available)
+    pub fn get_busy_cursor(&self) -> Option<u32> {
+        self.busy_cursor
+    }
+    
     /// Register a startup notification
     pub fn register_startup(
         &mut self,
@@ -76,13 +91,29 @@ impl StartupNotificationManager {
         if let Ok(reply) = conn.get_property(
             false,
             window,
-            atoms._net_wm_pid, // Use _NET_STARTUP_ID if available
-            AtomEnum::CARDINAL,
+            atoms._net_startup_id,
+            atoms._utf8_string,
             0,
             1024,
         )?.reply() {
-            // TODO: Parse startup ID and associate with window
-            debug!("Associating window {} with startup notification", window);
+            if let Ok(startup_id) = String::from_utf8(reply.value) {
+                let startup_id = startup_id.trim_end_matches('\0').to_string();
+                if !startup_id.is_empty() {
+                    debug!("Associating window {} with startup notification: {}", window, startup_id);
+                    // Associate window with existing notification or create new one
+                    if let Some(notification) = self.notifications.get_mut(&startup_id) {
+                        notification.window = Some(window);
+                    } else {
+                        // Create new notification for this window
+                        self.notifications.insert(startup_id.clone(), StartupNotification {
+                            startup_id: startup_id.clone(),
+                            window: Some(window),
+                            timestamp: x11rb::CURRENT_TIME,
+                            complete: false,
+                        });
+                    }
+                }
+            }
         }
         
         Ok(())
@@ -100,6 +131,21 @@ impl StartupNotificationManager {
     pub fn remove_startup(&mut self, startup_id: &str) {
         self.notifications.remove(startup_id);
     }
+    
+    /// Check if window has active startup notification
+    pub fn has_startup_for_window(&self, window: u32) -> bool {
+        self.notifications.values().any(|n| n.window == Some(window) && !n.complete)
+    }
+    
+    /// Mark startup complete for window
+    pub fn mark_window_complete(&mut self, window: u32) {
+        for notification in self.notifications.values_mut() {
+            if notification.window == Some(window) && !notification.complete {
+                notification.complete = true;
+                debug!("Startup notification for window {} marked as complete", window);
+            }
+        }
+    }
 }
 
 impl Default for StartupNotificationManager {
@@ -107,6 +153,7 @@ impl Default for StartupNotificationManager {
         Self::new()
     }
 }
+
 
 
 

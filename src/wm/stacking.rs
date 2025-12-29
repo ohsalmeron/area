@@ -4,7 +4,7 @@
 //! This matches xfwm4's stacking system.
 
 use anyhow::Result;
-use tracing::{debug, info, warn};
+use tracing::debug;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
@@ -13,7 +13,6 @@ use x11rb::wrapper::ConnectionExt as _;
 use crate::wm::client::Client;
 use crate::wm::client_flags::WindowLayer;
 use crate::wm::display::DisplayInfo;
-use crate::wm::ewmh::Atoms;
 use crate::wm::screen::ScreenInfo;
 
 /// Stacking manager
@@ -39,8 +38,32 @@ impl StackingManager {
         window: u32,
         clients: &std::collections::HashMap<u32, Client>,
     ) -> Result<()> {
-        debug!("Raising window {}", window);
+        self.raise_window_with_transients(conn, display_info, screen_info, window, clients, &std::collections::HashMap::new())
+    }
+    
+    /// Raise a window to the top of its layer, and also raise its transients
+    pub fn raise_window_with_transients(
+        &mut self,
+        conn: &RustConnection,
+        display_info: &DisplayInfo,
+        screen_info: &ScreenInfo,
+        window: u32,
+        clients: &std::collections::HashMap<u32, Client>,
+        transients: &std::collections::HashMap<u32, u32>, // child -> parent
+    ) -> Result<()> {
+        debug!("Raising window {} with transients", window);
         
+        // First, raise all transients recursively (bottom-up)
+        let transients_for_window: Vec<u32> = transients.iter()
+            .filter_map(|(child, &parent)| if parent == window { Some(*child) } else { None })
+            .collect();
+        
+        for &transient in &transients_for_window {
+            // Recursively raise transients of transients
+            self.raise_window_with_transients(conn, display_info, screen_info, transient, clients, transients)?;
+        }
+        
+        // Now raise the window itself
         // Remove from stacking order
         self.stacking_order.retain(|&w| w != window);
         
@@ -52,6 +75,27 @@ impl StackingManager {
             window,
             &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
         )?;
+        
+        // Raise transients above the parent (they should be above parent in stacking order)
+        for &transient in &transients_for_window {
+            // Remove transient from stacking order
+            self.stacking_order.retain(|&w| w != transient);
+            
+            // Add transient after parent
+            if let Some(pos) = self.stacking_order.iter().position(|&w| w == window) {
+                self.stacking_order.insert(pos + 1, transient);
+            } else {
+                self.stacking_order.push(transient);
+            }
+            
+            // Apply X11 stacking - stack transient above parent
+            conn.configure_window(
+                transient,
+                &ConfigureWindowAux::new()
+                    .sibling(window)
+                    .stack_mode(StackMode::ABOVE),
+            )?;
+        }
         
         // Update _NET_CLIENT_LIST_STACKING
         self.update_client_list_stacking(conn, display_info, screen_info, clients)?;
@@ -173,11 +217,11 @@ impl StackingManager {
             clients.get(&w).map(|c| c.mapped()).unwrap_or(false)
         });
         
-        // Set root property
+        // Set root property using correct atom
         conn.change_property32(
             PropMode::REPLACE,
             screen_info.root,
-            display_info.atoms.net_client_list,
+            display_info.atoms.net_client_list_stacking,
             AtomEnum::WINDOW,
             &client_list,
         )?;

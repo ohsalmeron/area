@@ -3,8 +3,8 @@
 //! Enhanced EWMH client message handlers and root property management.
 //! This module provides complete EWMH support matching xfwm4.
 
-use anyhow::{Context, Result};
-use tracing::{debug, info, warn};
+use anyhow::Result;
+use tracing::{debug, warn};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
@@ -13,7 +13,6 @@ use x11rb::wrapper::ConnectionExt as _;
 use crate::wm::client::Client;
 use crate::wm::client_flags::ClientFlags;
 use crate::wm::display::DisplayInfo;
-use crate::wm::ewmh::Atoms;
 use crate::wm::screen::ScreenInfo;
 use crate::shared::Geometry;
 
@@ -126,6 +125,7 @@ pub fn handle_net_wm_moveresize(
     window: u32,
     data: &[u32; 5],
     clients: &mut std::collections::HashMap<u32, Client>,
+    move_resize_manager: &mut crate::wm::moveresize::MoveResizeManager,
 ) -> Result<()> {
     let root_x = data[0] as i16;
     let root_y = data[1] as i16;
@@ -134,11 +134,80 @@ pub fn handle_net_wm_moveresize(
     debug!("_NET_WM_MOVERESIZE: window={}, root_x={}, root_y={}, direction={}", 
         window, root_x, root_y, direction);
     
-    if let Some(_client) = clients.get(&window) {
-        // TODO: Implement interactive move/resize
-        // This requires entering a drag loop similar to Alt+drag
-        // For now, just log the request
-        debug!("_NET_WM_MOVERESIZE not yet fully implemented for window {}", window);
+    if let Some(client) = clients.get(&window) {
+        // _NET_WM_MOVERESIZE direction values:
+        // 0 = Cancel, 1 = Move, 2-9 = Resize directions (same as ResizeDirection)
+        // 10 = Keyboard move, 11 = Keyboard resize
+        
+        if direction == 0 {
+            debug!("_NET_WM_MOVERESIZE: Cancel requested for window {}", window);
+            // Cancel any ongoing move/resize operation
+            // This would be handled by MoveResizeManager if it had a cancel method
+            return Ok(());
+        }
+        
+        // Get current pointer position for move/resize start
+        let pointer_reply = conn.query_pointer(screen_info.root)?.reply()?;
+        let pointer_x = pointer_reply.root_x as i16;
+        let pointer_y = pointer_reply.root_y as i16;
+        
+        // Map direction to ResizeDirection or Move
+        use crate::wm::moveresize::{MoveResizeOperation, ResizeDirection};
+        let operation = match direction {
+            1 => MoveResizeOperation::Move,
+            2 => MoveResizeOperation::Resize(ResizeDirection::TopLeft),
+            3 => MoveResizeOperation::Resize(ResizeDirection::Top),
+            4 => MoveResizeOperation::Resize(ResizeDirection::TopRight),
+            5 => MoveResizeOperation::Resize(ResizeDirection::Right),
+            6 => MoveResizeOperation::Resize(ResizeDirection::BottomRight),
+            7 => MoveResizeOperation::Resize(ResizeDirection::Bottom),
+            8 => MoveResizeOperation::Resize(ResizeDirection::BottomLeft),
+            9 => MoveResizeOperation::Resize(ResizeDirection::Left),
+            10 => MoveResizeOperation::Keyboard, // Keyboard move
+            11 => MoveResizeOperation::Keyboard, // Keyboard resize
+            _ => {
+                warn!("_NET_WM_MOVERESIZE: Invalid direction {} for window {}", direction, window);
+                return Ok(());
+            }
+        };
+        
+        debug!("_NET_WM_MOVERESIZE: Starting {:?} for window {} at ({}, {})", 
+            operation, window, pointer_x, pointer_y);
+        
+        // Start move/resize operation
+        match operation {
+            MoveResizeOperation::Move => {
+                if let Err(err) = move_resize_manager.start_move(
+                    conn,
+                    display_info,
+                    screen_info,
+                    window,
+                    pointer_x,
+                    pointer_y,
+                    client,
+                ) {
+                    warn!("Failed to start move for window {}: {}", window, err);
+                }
+            }
+            MoveResizeOperation::Resize(direction) => {
+                if let Err(err) = move_resize_manager.start_resize(
+                    conn,
+                    display_info,
+                    screen_info,
+                    window,
+                    pointer_x,
+                    pointer_y,
+                    direction,
+                    client,
+                ) {
+                    warn!("Failed to start resize for window {}: {}", window, err);
+                }
+            }
+            MoveResizeOperation::Keyboard => {
+                debug!("_NET_WM_MOVERESIZE: Keyboard move/resize not yet fully implemented");
+                // Keyboard move/resize would require entering keyboard mode
+            }
+        }
     } else {
         warn!("_NET_WM_MOVERESIZE: window {} not found", window);
     }
@@ -266,7 +335,7 @@ pub fn update_client_list_stacking(
     conn.change_property32(
         PropMode::REPLACE,
         screen_info.root,
-        display_info.atoms.net_client_list,
+        display_info.atoms.net_client_list_stacking,
         AtomEnum::WINDOW,
         &client_list,
     )?;

@@ -3,15 +3,11 @@
 //! Manages transient windows, modal dialogs, and window groups.
 //! This matches xfwm4's transient window management.
 
-use anyhow::Result;
-use tracing::{debug, info, warn};
-use x11rb::connection::Connection;
-use x11rb::protocol::xproto::*;
-use x11rb::rust_connection::RustConnection;
+use std::collections::HashMap;
+use tracing::debug;
 
 use crate::wm::client::Client;
 use crate::wm::client_flags::ClientFlags;
-use crate::wm::screen::ScreenInfo;
 
 /// Transient manager
 pub struct TransientManager {

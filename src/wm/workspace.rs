@@ -5,14 +5,12 @@
 
 use anyhow::Result;
 use tracing::{debug, info, warn};
-use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
 use crate::wm::client::Client;
 use crate::wm::display::DisplayInfo;
-use crate::wm::ewmh::Atoms;
 use crate::wm::screen::ScreenInfo;
 
 /// Workspace manager
@@ -95,6 +93,90 @@ impl WorkspaceManager {
         Ok(())
     }
     
+    /// Move window to a workspace (by window ID)
+    pub fn move_window_to_workspace_by_id(
+        &mut self,
+        conn: &RustConnection,
+        display_info: &DisplayInfo,
+        screen_info: &ScreenInfo,
+        window_id: u32,
+        workspace: u32,
+        transient_manager: &crate::wm::transients::TransientManager,
+        clients: &mut std::collections::HashMap<u32, Client>,
+    ) -> Result<()> {
+        // Inline the logic to avoid borrow checker issues
+        if workspace != ALL_WORKSPACES && workspace >= self.workspace_count {
+            warn!("Invalid workspace index: {} (max: {})", workspace, self.workspace_count - 1);
+            return Ok(());
+        }
+        
+        let client = clients.get_mut(&window_id)
+            .ok_or_else(|| anyhow::anyhow!("Window not found"))?;
+        
+        debug!("Moving window {} to workspace {}", client.window, workspace);
+        
+        client.win_workspace = workspace;
+        
+        // Update visibility if not on current workspace
+        if workspace != ALL_WORKSPACES && workspace != self.current_workspace {
+            if let Some(frame) = &client.frame {
+                conn.unmap_window(frame.frame)?;
+            } else {
+                conn.unmap_window(client.window)?;
+            }
+        } else {
+            if let Some(frame) = &client.frame {
+                conn.map_window(frame.frame)?;
+            } else {
+                conn.map_window(client.window)?;
+            }
+        }
+        
+        // Update _NET_WM_DESKTOP
+        conn.change_property32(
+            PropMode::REPLACE,
+            client.window,
+            display_info.atoms.net_wm_desktop,
+            AtomEnum::CARDINAL,
+            &[workspace],
+        )?;
+        
+        // Move transients with parent to the same workspace
+        // Get transient IDs first to avoid borrow conflicts
+        let transients: Vec<u32> = transient_manager.get_transients(client.window);
+        drop(client); // Drop client borrow before accessing clients again
+        
+        for transient_id in transients {
+            if let Some(transient_client) = clients.get_mut(&transient_id) {
+                transient_client.win_workspace = workspace;
+                
+                if workspace != ALL_WORKSPACES && workspace != self.current_workspace {
+                    if let Some(frame) = &transient_client.frame {
+                        let _ = conn.unmap_window(frame.frame);
+                    } else {
+                        let _ = conn.unmap_window(transient_id);
+                    }
+                } else {
+                    if let Some(frame) = &transient_client.frame {
+                        let _ = conn.map_window(frame.frame);
+                    } else {
+                        let _ = conn.map_window(transient_id);
+                    }
+                }
+                
+                let _ = conn.change_property32(
+                    PropMode::REPLACE,
+                    transient_id,
+                    display_info.atoms.net_wm_desktop,
+                    AtomEnum::CARDINAL,
+                    &[workspace],
+                );
+            }
+        }
+        
+        Ok(())
+    }
+    
     /// Move window to a workspace
     pub fn move_window_to_workspace(
         &mut self,
@@ -103,6 +185,8 @@ impl WorkspaceManager {
         screen_info: &ScreenInfo,
         client: &mut Client,
         workspace: u32,
+        transient_manager: &crate::wm::transients::TransientManager,
+        clients: &mut std::collections::HashMap<u32, Client>,
     ) -> Result<()> {
         if workspace != ALL_WORKSPACES && workspace >= self.workspace_count {
             warn!("Invalid workspace index: {} (max: {})", workspace, self.workspace_count - 1);
@@ -138,6 +222,41 @@ impl WorkspaceManager {
             AtomEnum::CARDINAL,
             &[workspace],
         )?;
+        
+        // Move transients with parent to the same workspace
+        let transients = transient_manager.get_transients(client.window);
+        for transient_id in transients {
+            if let Some(transient_client) = clients.get_mut(&transient_id) {
+                // Move transient to same workspace as parent
+                transient_client.win_workspace = workspace;
+                
+                // Update visibility
+                if workspace != ALL_WORKSPACES && workspace != self.current_workspace {
+                    // Hide transient
+                    if let Some(frame) = &transient_client.frame {
+                        let _ = conn.unmap_window(frame.frame);
+                    } else {
+                        let _ = conn.unmap_window(transient_id);
+                    }
+                } else {
+                    // Show transient
+                    if let Some(frame) = &transient_client.frame {
+                        let _ = conn.map_window(frame.frame);
+                    } else {
+                        let _ = conn.map_window(transient_id);
+                    }
+                }
+                
+                // Update _NET_WM_DESKTOP for transient
+                let _ = conn.change_property32(
+                    PropMode::REPLACE,
+                    transient_id,
+                    display_info.atoms.net_wm_desktop,
+                    AtomEnum::CARDINAL,
+                    &[workspace],
+                );
+            }
+        }
         
         Ok(())
     }

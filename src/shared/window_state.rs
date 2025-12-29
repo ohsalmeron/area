@@ -3,6 +3,8 @@
 //! This module defines the unified `Window` structure that contains both
 //! window manager state and compositor state, eliminating the need for IPC.
 
+use anyhow::Result;
+
 /// Window geometry
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Geometry {
@@ -26,6 +28,27 @@ pub struct WindowFrame {
     pub close_button: u32,
     pub maximize_button: u32,
     pub minimize_button: u32,
+}
+
+impl WindowFrame {
+    /// Update the titlebar text by setting WM_NAME property
+    pub fn update_title<C: x11rb::connection::Connection>(
+        &self,
+        conn: &C,
+        title: &str,
+    ) -> Result<()> {
+        use x11rb::protocol::xproto::*;
+        use x11rb::wrapper::ConnectionExt as _;
+        conn.change_property8(
+            PropMode::REPLACE,
+            self.titlebar,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            title.as_bytes(),
+        )?;
+        conn.flush()?;
+        Ok(())
+    }
 }
 
 /// Window flags

@@ -650,6 +650,10 @@ impl CompositorInner {
             // CRITICAL: Don't check failed windows every frame - this causes performance issues
             let windows_to_bind: Vec<u32> = self.windows.values()
                 .filter(|w| {
+                    // Skip frame windows - they don't have content to composite
+                    if w.id != w.client_id {
+                        return false; // This is a frame window
+                    }
                     // Only attempt binding if window is viewable, has no texture, and hasn't failed
                     w.viewable && !renderer.has_texture(w.id) && !w.bind_failed
                 })
@@ -754,20 +758,50 @@ impl CompositorInner {
                     None => continue,
                 };
 
+                // Skip pixmap creation for frame windows - they're decoration only and don't have content
+                // Frame windows are identified by: window.id != window.client_id
+                // Secondary check: verify window class (InputOnly windows are frame windows)
+                let is_frame_window = window.id != window.client_id;
+                if is_frame_window {
+                    // Additional verification: check window attributes for InputOnly class
+                    if let Ok(Ok(attrs)) = conn.get_window_attributes(window_id).map(|c| c.reply()) {
+                        use x11rb::protocol::xproto::WindowClass;
+                        if attrs.class == WindowClass::INPUT_ONLY {
+                            debug!("Skipping pixmap creation for frame window {} (InputOnly class, client_id: {})", window_id, window.client_id);
+                        } else {
+                            debug!("Skipping pixmap creation for frame window {} (client_id: {})", window_id, window.client_id);
+                        }
+                    } else {
+                        debug!("Skipping pixmap creation for frame window {} (client_id: {})", window_id, window.client_id);
+                    }
+                    continue;
+                }
+
                 // Use client_id for pixmap creation - the actual window content is in the client window
-                // window.id might be a frame window (decoration), but we need the client window content
                 let composite_id = window.client_id;
 
                 if let Ok(pixmap) = conn.generate_id() {
-                    debug!("Attempting to create pixmap {} for window {}", pixmap, window_id);
+                    debug!("Attempting to create pixmap {} for window {} (client_id: {})", pixmap, window_id, composite_id);
                     match conn.composite_name_window_pixmap(composite_id, pixmap) {
                         Ok(cookie) => {
                             if cookie.check().is_err() {
-                                warn!("composite_name_window_pixmap failed for window {} (pixmap {})", window_id, pixmap);
+                                // Check if this is a frame window (shouldn't happen due to filter, but check anyway)
+                                let is_frame = window.id != window.client_id;
+                                if is_frame {
+                                    // Frame window pixmap creation failure is expected - log as debug
+                                    debug!("composite_name_window_pixmap failed for frame window {} (pixmap {}), this is expected", window_id, pixmap);
+                                } else {
+                                    // Client window pixmap creation failure is an error
+                                    warn!("composite_name_window_pixmap failed for client window {} (pixmap {})", window_id, pixmap);
+                                }
                                 if let Some(w) = self.windows.get_mut(&window_id) {
                                     w.bind_failed = true;
                                     if !w.bind_failure_logged {
-                                        warn!("Window {} marked as bind_failed - will skip future pixmap creation attempts", window_id);
+                                        if is_frame {
+                                            debug!("Frame window {} marked as bind_failed - will skip future pixmap creation attempts", window_id);
+                                        } else {
+                                            warn!("Client window {} marked as bind_failed - will skip future pixmap creation attempts", window_id);
+                                        }
                                         w.bind_failure_logged = true;
                                     }
                                 }

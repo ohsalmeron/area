@@ -218,6 +218,17 @@ pub struct WmHints {
     pub window_group: Option<u32>,
 }
 
+impl WmHints {
+    /// Check if urgency hint is set
+    /// WM_HINTS flags: bit 5 (1 << 5) = StateHint
+    /// Urgency is indicated by StateHint flag AND initial_state having bit 8 set (0x100)
+    pub fn is_urgent(&self) -> bool {
+        // StateHint is bit 5 (1 << 5 = 32)
+        // Urgency is indicated by initial_state having bit 8 set (0x100 = 256)
+        (self.flags & (1 << 5)) != 0 && (self.initial_state & 0x100) != 0
+    }
+}
+
 /// Class hint (XClassHint equivalent)
 #[derive(Debug, Clone)]
 pub struct ClassHint {
@@ -494,7 +505,7 @@ impl Client {
 // Compatibility: Add fields that old code expects
 impl Client {
     /// Compatibility: Get state as mutable reference (creates temporary)
-    pub fn state_mut(&mut self) -> StateMut {
+    pub fn state_mut(&mut self) -> StateMut<'_> {
         StateMut { client: self }
     }
 }

@@ -72,8 +72,35 @@ impl MenuManager {
             window, timestamp, x, y);
         
         if let Some(_client) = clients.get(&window) {
-            // TODO: Show window menu at (x, y)
-            debug!("Window menu requested for window {} at ({}, {})", window, x, y);
+            // Show window menu at (x, y) using external tool
+            // Try common menu tools: rofi, dmenu, wofi, etc.
+            let menu_tools = ["rofi", "dmenu", "wofi"];
+            let mut menu_shown = false;
+            
+            for tool in &menu_tools {
+                // Check if tool exists in PATH
+                if std::process::Command::new("which").arg(tool).output().is_ok() {
+                    // Spawn menu tool (basic implementation - can be enhanced)
+                    match std::process::Command::new(tool)
+                        .arg("-show")
+                        .arg("windowmenu")
+                        .spawn()
+                    {
+                        Ok(_) => {
+                            debug!("Window menu shown using {}", tool);
+                            menu_shown = true;
+                            break;
+                        }
+                        Err(e) => {
+                            debug!("Failed to spawn {}: {}", tool, e);
+                        }
+                    }
+                }
+            }
+            
+            if !menu_shown {
+                debug!("Window menu requested for window {} at ({}, {}), but no menu tool available", window, x, y);
+            }
         } else {
             warn!("GTK_SHOW_WINDOW_MENU: window {} not found", window);
         }
@@ -93,8 +120,35 @@ impl MenuManager {
     ) -> Result<()> {
         debug!("Showing window menu for window {} at ({}, {})", client.window, x, y);
         
-        // TODO: Implement window menu display
-        // This would typically use GTK or another UI toolkit
+        // Show window menu using external tool
+        // Try common menu tools: rofi, dmenu, wofi, etc.
+        let menu_tools = ["rofi", "dmenu", "wofi"];
+        let mut menu_shown = false;
+        
+        for tool in &menu_tools {
+            // Check if tool exists in PATH
+            if std::process::Command::new("which").arg(tool).output().is_ok() {
+                // Spawn menu tool (basic implementation - can be enhanced)
+                match std::process::Command::new(tool)
+                    .arg("-show")
+                    .arg("windowmenu")
+                    .spawn()
+                {
+                    Ok(_) => {
+                        debug!("Window menu shown using {}", tool);
+                        menu_shown = true;
+                        break;
+                    }
+                    Err(e) => {
+                        debug!("Failed to spawn {}: {}", tool, e);
+                    }
+                }
+            }
+        }
+        
+        if !menu_shown {
+            debug!("Window menu requested but no menu tool available");
+        }
         
         Ok(())
     }

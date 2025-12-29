@@ -4,9 +4,8 @@
 //! This matches xfwm4's window placement system.
 
 use anyhow::Result;
-use tracing::{debug, info};
+use tracing::debug;
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 
 use crate::shared::Geometry;

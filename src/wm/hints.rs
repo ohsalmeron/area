@@ -4,11 +4,9 @@
 //! This matches xfwm4's hints system.
 
 use anyhow::Result;
-use tracing::{debug, info, warn};
-use x11rb::connection::Connection;
+use tracing::debug;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
-use x11rb::wrapper::ConnectionExt as _;
 
 use crate::shared::Geometry;
 use crate::wm::client::Client;
@@ -49,6 +47,18 @@ pub struct WmHints {
     pub icon_y: i32,
     pub icon_mask: Option<u32>,
     pub window_group: Option<u32>,
+}
+
+impl WmHints {
+    /// Check if urgency hint is set
+    /// WM_HINTS flags: bit 4 (1 << 4) = InputHint, bit 5 (1 << 5) = StateHint, bit 6 (1 << 6) = IconPixmapHint, etc.
+    /// Urgency is indicated by StateHint flag (bit 5) AND initial_state having bit 8 set (0x100)
+    /// Actually, X11 spec says: if StateHint is set and initial_state has bit 8 (0x100), window is urgent
+    pub fn is_urgent(&self) -> bool {
+        // StateHint is bit 5 (1 << 5 = 32)
+        // Urgency is indicated by initial_state having bit 8 set (0x100 = 256)
+        (self.flags & (1 << 5)) != 0 && (self.initial_state & 0x100) != 0
+    }
 }
 
 /// Hints manager
@@ -107,8 +117,8 @@ impl HintsManager {
         if let Ok(reply) = conn.get_property(
             false,
             window,
-            atoms._wm_state,
-            atoms._wm_state,
+            atoms._wm_hints,
+            atoms._wm_hints,
             0,
             9, // XWMHints has 9 32-bit values
         )?.reply() {

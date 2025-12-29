@@ -56,14 +56,39 @@ impl EventFilterManager {
     ) -> FilterStatus {
         // Check rules
         for rule in &self.rules {
+            // Check window match
             if let Some(rule_window) = rule.window {
                 if rule_window != window {
                     continue;
                 }
             }
             
-            // TODO: Check event type
+            // Check event type match
+            if let Some(rule_event_type) = rule.event_type {
+                let event_type = match event {
+                    Event::MapRequest(_) => 20,
+                    Event::UnmapNotify(_) => 18,
+                    Event::ConfigureRequest(_) => 23,
+                    Event::CreateNotify(_) => 16,
+                    Event::DestroyNotify(_) => 17,
+                    Event::ClientMessage(_) => 33,
+                    Event::MapNotify(_) => 19,
+                    Event::ButtonPress(_) => 4,
+                    Event::ButtonRelease(_) => 5,
+                    Event::MotionNotify(_) => 6,
+                    Event::KeyPress(_) => 2,
+                    Event::KeyRelease(_) => 3,
+                    Event::PropertyNotify(_) => 28,
+                    Event::FocusIn(_) => 9,
+                    Event::FocusOut(_) => 10,
+                    _ => 0,
+                };
+                if rule_event_type != event_type {
+                    continue;
+                }
+            }
             
+            // Rule matches
             return rule.action;
         }
         

@@ -16,6 +16,7 @@ use x11rb::wrapper::ConnectionExt as _;
 pub struct Atoms {
     pub net_supported: Atom,
     pub net_client_list: Atom,
+    pub net_client_list_stacking: Atom,
     pub net_number_of_desktops: Atom,
     pub net_current_desktop: Atom,
     pub net_active_window: Atom,
@@ -70,11 +71,14 @@ pub struct Atoms {
     // Supporting/Desktop atoms
     pub _net_supporting_wm_check: Atom,
     pub _net_wm_pid: Atom,
+    pub _net_wm_icon: Atom,
+    pub _net_startup_id: Atom,
     pub _net_desktop_viewport: Atom,
     pub _net_desktop_names: Atom,
     // Strut atoms
     pub _net_wm_strut: Atom,
     pub _net_wm_strut_partial: Atom,
+    pub _net_workarea: Atom,
     // Standard X11 atoms
     pub _wm_protocols: Atom,
     pub _wm_delete_window: Atom,
@@ -82,9 +86,14 @@ pub struct Atoms {
     pub _wm_class: Atom,
     pub _wm_normal_hints: Atom,
     pub _wm_size_hints: Atom,
+    pub _wm_hints: Atom,
     pub _utf8_string: Atom,
     // MOTIF WM Hints (for decoration control)
     pub _motif_wm_hints: Atom,
+    // WM_CLIENT_LEADER for window grouping
+    pub wm_client_leader: Atom,
+    // _NET_WM_ICON_GEOMETRY for icon placement hints
+    pub _net_wm_icon_geometry: Atom,
 }
 
 impl Atoms {
@@ -98,6 +107,7 @@ impl Atoms {
         Ok(Self {
             net_supported: intern("_NET_SUPPORTED")?,
             net_client_list: intern("_NET_CLIENT_LIST")?,
+            net_client_list_stacking: intern("_NET_CLIENT_LIST_STACKING")?,
             net_number_of_desktops: intern("_NET_NUMBER_OF_DESKTOPS")?,
             net_current_desktop: intern("_NET_CURRENT_DESKTOP")?,
             net_active_window: intern("_NET_ACTIVE_WINDOW")?,
@@ -152,11 +162,14 @@ impl Atoms {
             // Supporting/Desktop atoms
             _net_supporting_wm_check: intern("_NET_SUPPORTING_WM_CHECK")?,
             _net_wm_pid: intern("_NET_WM_PID")?,
+            _net_wm_icon: intern("_NET_WM_ICON")?,
+            _net_startup_id: intern("_NET_STARTUP_ID")?,
             _net_desktop_viewport: intern("_NET_DESKTOP_VIEWPORT")?,
             _net_desktop_names: intern("_NET_DESKTOP_NAMES")?,
             // Strut atoms
             _net_wm_strut: intern("_NET_WM_STRUT")?,
             _net_wm_strut_partial: intern("_NET_WM_STRUT_PARTIAL")?,
+            _net_workarea: intern("_NET_WORKAREA")?,
             // Standard X11 atoms
             _wm_protocols: intern("WM_PROTOCOLS")?,
             _wm_delete_window: intern("WM_DELETE_WINDOW")?,
@@ -164,8 +177,11 @@ impl Atoms {
             _wm_class: intern("WM_CLASS")?,
             _wm_normal_hints: intern("WM_NORMAL_HINTS")?,
             _wm_size_hints: intern("WM_SIZE_HINTS")?,
+            _wm_hints: intern("WM_HINTS")?,
             _utf8_string: intern("UTF8_STRING")?,
             _motif_wm_hints: intern("_MOTIF_WM_HINTS")?,
+            wm_client_leader: intern("WM_CLIENT_LEADER")?,
+            _net_wm_icon_geometry: intern("_NET_WM_ICON_GEOMETRY")?,
         })
     }
 
@@ -526,5 +542,28 @@ impl Atoms {
         }
         // MOTIF hints not present or don't specify decoration preference
         Ok(None)
+    }
+    
+    /// Update _NET_WORKAREA property on root window
+    pub fn update_workarea<C: Connection>(
+        &self,
+        conn: &C,
+        root: Window,
+        work_area: &crate::shared::Geometry,
+    ) -> Result<()> {
+        let data = [
+            work_area.x as u32,
+            work_area.y as u32,
+            work_area.width,
+            work_area.height,
+        ];
+        conn.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            root,
+            self._net_workarea,
+            x11rb::protocol::xproto::AtomEnum::CARDINAL,
+            &data,
+        )?;
+        Ok(())
     }
 }

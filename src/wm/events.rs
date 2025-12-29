@@ -4,12 +4,12 @@
 //! This module provides centralized event processing and routing.
 
 use anyhow::Result;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use x11rb::connection::Connection;
+use x11rb::protocol::Event;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
-use x11rb::protocol::Event;
 
 use crate::wm::client::Client;
 use crate::wm::display::DisplayInfo;

@@ -7,7 +7,6 @@ use anyhow::Result;
 use std::sync::Arc;
 use tracing::{debug, info};
 use x11rb::protocol::xproto::*;
-use x11rb::rust_connection::RustConnection;
 
 use crate::shared::Geometry;
 use crate::wm::client::Client;
@@ -104,6 +103,9 @@ pub struct ScreenInfo {
     /// Margins
     pub margins: [i32; 4], // left, right, top, bottom
     
+    /// Strut windows (windows with _NET_WM_STRUT or _NET_WM_STRUT_PARTIAL)
+    pub strut_windows: std::collections::HashSet<u32>,
+    
     /// Last raised window (for focus tracking)
     pub last_raise: Option<Arc<Client>>,
 }
@@ -178,6 +180,7 @@ impl ScreenInfo {
             num_monitors: 1,
             work_area,
             margins: [0, 0, 0, 0],
+            strut_windows: std::collections::HashSet::new(),
             last_raise: None,
         })
     }
@@ -219,7 +222,8 @@ impl ScreenInfo {
         work_width = work_width.saturating_sub((self.margins[0] + self.margins[1]) as u32); // left + right
         work_height = work_height.saturating_sub((self.margins[2] + self.margins[3]) as u32); // top + bottom
         
-        // TODO: Apply struts from panels/docks
+        // Struts are applied by reading from windows in PropertyNotify handler
+        // This method just recalculates from current state
         
         self.work_area = Geometry {
             x: work_x,
@@ -230,6 +234,110 @@ impl ScreenInfo {
         
         debug!("Updated work area: {}x{} at ({}, {})", 
             work_width, work_height, work_x, work_y);
+    }
+    
+    /// Update work area from struts (called when strut properties change)
+    pub fn update_work_area_from_struts<C: x11rb::connection::Connection>(
+        &mut self,
+        conn: &C,
+        atoms: &crate::wm::ewmh::Atoms,
+        clients: &std::collections::HashMap<u32, Client>,
+    ) -> anyhow::Result<()> {
+        use x11rb::protocol::xproto::AtomEnum;
+        use x11rb::wrapper::ConnectionExt as _;
+        
+        // Start with full screen
+        let mut left_strut = 0u32;
+        let mut right_strut = 0u32;
+        let mut top_strut = 0u32;
+        let mut bottom_strut = 0u32;
+        
+        // Collect struts from all strut windows
+        for &window_id in &self.strut_windows {
+            // Try _NET_WM_STRUT_PARTIAL first (more precise)
+            if let Ok(reply) = conn.get_property(
+                false,
+                window_id,
+                atoms._net_wm_strut_partial,
+                AtomEnum::CARDINAL,
+                0,
+                12,
+            )?.reply() {
+                if let Some(mut value32) = reply.value32() {
+                    // Format: left, right, top, bottom, left_start_y, left_end_y, right_start_y, right_end_y, top_start_x, top_end_x, bottom_start_x, bottom_end_x
+                    if let (Some(left), Some(right), Some(top), Some(bottom)) = 
+                        (value32.next(), value32.next(), value32.next(), value32.next()) {
+                        // For simplicity, use the strut values (full implementation would use partial coordinates)
+                        left_strut = left_strut.max(left);
+                        right_strut = right_strut.max(right);
+                        top_strut = top_strut.max(top);
+                        bottom_strut = bottom_strut.max(bottom);
+                    }
+                }
+            } else {
+                // Fall back to _NET_WM_STRUT
+                if let Ok(reply) = conn.get_property(
+                    false,
+                    window_id,
+                    atoms._net_wm_strut,
+                    AtomEnum::CARDINAL,
+                    0,
+                    4,
+                )?.reply() {
+                    if let Some(mut value32) = reply.value32() {
+                        if let (Some(left), Some(right), Some(top), Some(bottom)) = 
+                            (value32.next(), value32.next(), value32.next(), value32.next()) {
+                            left_strut = left_strut.max(left);
+                            right_strut = right_strut.max(right);
+                            top_strut = top_strut.max(top);
+                            bottom_strut = bottom_strut.max(bottom);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Apply struts to work area
+        let mut work_x = left_strut as i32;
+        let mut work_y = top_strut as i32;
+        let mut work_width = self.width as u32;
+        let mut work_height = self.height as u32;
+        
+        work_width = work_width.saturating_sub(left_strut).saturating_sub(right_strut);
+        work_height = work_height.saturating_sub(top_strut).saturating_sub(bottom_strut);
+        
+        // Apply margins on top of struts
+        work_x += self.margins[0]; // left
+        work_y += self.margins[2]; // top
+        work_width = work_width.saturating_sub((self.margins[0] + self.margins[1]) as u32); // left + right
+        work_height = work_height.saturating_sub((self.margins[2] + self.margins[3]) as u32); // top + bottom
+        
+        self.work_area = Geometry {
+            x: work_x,
+            y: work_y,
+            width: work_width,
+            height: work_height,
+        };
+        
+        debug!("Updated work area from struts: {}x{} at ({}, {})", 
+            work_width, work_height, work_x, work_y);
+        
+        // Update _NET_WORKAREA root property
+        let work_area_array = [
+            self.work_area.x as u32,
+            self.work_area.y as u32,
+            self.work_area.width,
+            self.work_area.height,
+        ];
+        conn.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.root,
+            atoms._net_workarea,
+            AtomEnum::CARDINAL,
+            &work_area_array,
+        )?;
+        
+        Ok(())
     }
     
     /// Find monitor at point
