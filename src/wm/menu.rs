@@ -45,15 +45,16 @@ impl MenuManager {
     /// Create a new menu manager
     pub fn new(conn: &RustConnection, atoms: &Atoms) -> Result<Self> {
         // Intern GTK_SHOW_WINDOW_MENU atom
-        let gtk_show_window_menu = conn.intern_atom(false, b"GTK_SHOW_WINDOW_MENU")?
+        let gtk_show_window_menu = conn
+            .intern_atom(false, b"GTK_SHOW_WINDOW_MENU")?
             .reply()?
             .atom;
-        
+
         Ok(Self {
             gtk_show_window_menu,
         })
     }
-    
+
     /// Handle GTK_SHOW_WINDOW_MENU client message
     pub fn handle_gtk_show_window_menu(
         &self,
@@ -67,20 +68,25 @@ impl MenuManager {
         let timestamp = data[0];
         let x = data[1] as i16;
         let y = data[2] as i16;
-        
-        debug!("GTK_SHOW_WINDOW_MENU: window={}, timestamp={}, x={}, y={}", 
-            window, timestamp, x, y);
-        
+
+        debug!(
+            "GTK_SHOW_WINDOW_MENU: window={}, timestamp={}, x={}, y={}",
+            window, timestamp, x, y
+        );
+
         if let Some(_client) = clients.get(&window) {
             // TODO: Show window menu at (x, y)
-            debug!("Window menu requested for window {} at ({}, {})", window, x, y);
+            debug!(
+                "Window menu requested for window {} at ({}, {})",
+                window, x, y
+            );
         } else {
             warn!("GTK_SHOW_WINDOW_MENU: window {} not found", window);
         }
-        
+
         Ok(())
     }
-    
+
     /// Show window menu
     pub fn show_menu(
         &self,
@@ -91,14 +97,14 @@ impl MenuManager {
         x: i16,
         y: i16,
     ) -> Result<()> {
-        debug!("Showing window menu for window {} at ({}, {})", client.window, x, y);
-        
+        debug!(
+            "Showing window menu for window {} at ({}, {})",
+            client.window, x, y
+        );
+
         // TODO: Implement window menu display
         // This would typically use GTK or another UI toolkit
-        
+
         Ok(())
     }
 }
-
-
-

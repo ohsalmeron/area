@@ -14,7 +14,12 @@ pub struct Geometry {
 
 impl Geometry {
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 }
 
@@ -43,4 +48,3 @@ pub struct WindowFlags {
     pub below: bool,
     pub demands_attention: bool,
 }
-

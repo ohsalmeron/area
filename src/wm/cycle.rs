@@ -29,13 +29,13 @@ pub enum CycleMode {
 pub struct CycleManager {
     /// Current cycle list
     pub cycle_list: Vec<u32>,
-    
+
     /// Current cycle index
     pub cycle_index: usize,
-    
+
     /// Cycle mode
     pub mode: CycleMode,
-    
+
     /// Is cycling active?
     pub active: bool,
 }
@@ -50,7 +50,7 @@ impl CycleManager {
             active: false,
         }
     }
-    
+
     /// Start cycling
     pub fn start_cycle(
         &mut self,
@@ -62,18 +62,18 @@ impl CycleManager {
         mode: CycleMode,
     ) -> Result<()> {
         debug!("Starting window cycle (mode={:?})", mode);
-        
+
         self.mode = mode;
         self.active = true;
-        
+
         // Build cycle list based on mode
         self.build_cycle_list(focus_manager, clients, mode);
-        
+
         if self.cycle_list.is_empty() {
             self.active = false;
             return Ok(());
         }
-        
+
         // Start at first window (or next after current)
         if let Some(current) = focus_manager.get_focused_window() {
             if let Some(pos) = self.cycle_list.iter().position(|&w| w == current) {
@@ -84,13 +84,13 @@ impl CycleManager {
         } else {
             self.cycle_index = 0;
         }
-        
+
         // Show cycle preview
         // TODO: Implement cycle preview window
-        
+
         Ok(())
     }
-    
+
     /// Cycle to next window
     pub fn cycle_next(
         &mut self,
@@ -103,9 +103,9 @@ impl CycleManager {
         if !self.active || self.cycle_list.is_empty() {
             return Ok(());
         }
-        
+
         self.cycle_index = (self.cycle_index + 1) % self.cycle_list.len();
-        
+
         if let Some(&window) = self.cycle_list.get(self.cycle_index) {
             if let Some(client) = clients.get_mut(&window) {
                 focus_manager.set_focus(
@@ -117,10 +117,10 @@ impl CycleManager {
                 )?;
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Cycle to previous window
     pub fn cycle_prev(
         &mut self,
@@ -133,13 +133,13 @@ impl CycleManager {
         if !self.active || self.cycle_list.is_empty() {
             return Ok(());
         }
-        
+
         self.cycle_index = if self.cycle_index == 0 {
             self.cycle_list.len() - 1
         } else {
             self.cycle_index - 1
         };
-        
+
         if let Some(&window) = self.cycle_list.get(self.cycle_index) {
             if let Some(client) = clients.get_mut(&window) {
                 focus_manager.set_focus(
@@ -151,17 +151,17 @@ impl CycleManager {
                 )?;
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Finish cycling
     pub fn finish_cycle(&mut self) {
         self.active = false;
         self.cycle_list.clear();
         self.cycle_index = 0;
     }
-    
+
     /// Build cycle list
     fn build_cycle_list(
         &mut self,
@@ -170,7 +170,7 @@ impl CycleManager {
         mode: CycleMode,
     ) {
         self.cycle_list.clear();
-        
+
         match mode {
             CycleMode::All => {
                 // All mapped windows
@@ -199,12 +199,11 @@ impl CycleManager {
                 }
             }
         }
-        
+
         // Sort by focus history (most recent first)
         let history = focus_manager.get_focus_history();
-        self.cycle_list.sort_by_key(|&w| {
-            history.iter().position(|&h| h == w).unwrap_or(usize::MAX)
-        });
+        self.cycle_list
+            .sort_by_key(|&w| history.iter().position(|&h| h == w).unwrap_or(usize::MAX));
     }
 }
 
@@ -213,6 +212,3 @@ impl Default for CycleManager {
         Self::new()
     }
 }
-
-
-

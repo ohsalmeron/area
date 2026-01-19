@@ -1,0 +1,57 @@
+[package]
+name = "area-compositor"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "area-wayland"
+path = "src/main.rs"
+
+[dependencies]
+# Smithay and Wayland - matching Niri's feature set
+smithay = { workspace = true, features = [
+    "backend_drm",
+    "backend_egl",
+    "backend_gbm",
+    "backend_libinput",
+    "backend_session_libseat",
+    "backend_udev",
+    "backend_winit",
+    "desktop",
+    "renderer_gl",
+    "renderer_pixman",
+    "renderer_multi",
+    "use_system_lib",
+    "wayland_frontend",
+] }
+smithay-drm-extras = { workspace = true }
+calloop = { workspace = true }
+wayland-server = { workspace = true }
+wayland-protocols = { workspace = true }
+wayland-backend = { workspace = true }
+wayland-scanner = { workspace = true }
+
+# Rendering
+wgpu = { workspace = true }
+cairo-rs = { workspace = true }
+pango = { workspace = true }
+pangocairo = { workspace = true }
+
+# Input
+input = { workspace = true }
+
+# Utilities
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+# System
+nix = "0.28"
+libc = "0.2"
+dirs = "5.0"

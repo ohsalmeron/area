@@ -1,0 +1,24 @@
+[package]
+name = "area-desktop"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "area-desktop"
+path = "src/main.rs"
+
+[lib]
+name = "area_desktop"
+path = "src/lib.rs"
+
+[dependencies]
+wayland-client = { workspace = true }
+wayland-protocols = { workspace = true }
+smithay-client-toolkit = "0.18"
+cairo-rs = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

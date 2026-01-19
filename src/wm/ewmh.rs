@@ -10,7 +10,6 @@ use x11rb::wrapper::ConnectionExt as _;
 
 // EWMH (Extended Window Manager Hints) implementation... (rest of the code below)
 
-
 /// Holds all interned EWMH atoms
 #[derive(Debug)]
 pub struct Atoms {
@@ -170,11 +169,7 @@ impl Atoms {
     }
 
     /// Set up _NET_SUPPORTED on root window
-    pub fn setup_supported<C: Connection>(
-        &self,
-        conn: &C,
-        root: Window,
-    ) -> Result<()> {
+    pub fn setup_supported<C: Connection>(&self, conn: &C, root: Window) -> Result<()> {
         let supported = [
             self.net_supported,
             self.net_client_list,
@@ -241,7 +236,6 @@ impl Atoms {
         Ok(())
     }
 
-
     /// Update _NET_ACTIVE_WINDOW
     pub fn update_active_window<C: Connection>(
         &self,
@@ -297,7 +291,6 @@ impl Atoms {
         Ok(())
     }
 
-
     /// Set window state (add/remove EWMH states)
     /// This updates the _NET_WM_STATE property and sends PropertyNotify
     pub fn set_window_state<C: Connection>(
@@ -309,31 +302,27 @@ impl Atoms {
     ) -> Result<()> {
         // Get current state
         let mut states = Vec::new();
-        if let Ok(reply) = conn.get_property(
-            false,
-            window,
-            self.net_wm_state,
-            AtomEnum::ATOM,
-            0,
-            1024,
-        )?.reply() {
+        if let Ok(reply) = conn
+            .get_property(false, window, self.net_wm_state, AtomEnum::ATOM, 0, 1024)?
+            .reply()
+        {
             if let Some(value32) = reply.value32() {
                 states = value32.collect();
             }
         }
-        
+
         // Remove states
         for atom in remove {
             states.retain(|&a| a != *atom);
         }
-        
+
         // Add states
         for atom in add {
             if !states.contains(atom) {
                 states.push(*atom);
             }
         }
-        
+
         // Set new state (this will trigger PropertyNotify automatically)
         conn.change_property32(
             PropMode::REPLACE,
@@ -342,7 +331,7 @@ impl Atoms {
             AtomEnum::ATOM,
             &states,
         )?;
-        
+
         Ok(())
     }
 
@@ -353,14 +342,10 @@ impl Atoms {
         window: Window,
     ) -> Result<bool> {
         // Get WM_PROTOCOLS property
-        if let Ok(reply) = conn.get_property(
-            false,
-            window,
-            self._wm_protocols,
-            AtomEnum::ATOM,
-            0,
-            1024,
-        )?.reply() {
+        if let Ok(reply) = conn
+            .get_property(false, window, self._wm_protocols, AtomEnum::ATOM, 0, 1024)?
+            .reply()
+        {
             if let Some(value32) = reply.value32() {
                 // Check if WM_DELETE_WINDOW is in the protocols list
                 let protocols: Vec<u32> = value32.collect();
@@ -371,77 +356,74 @@ impl Atoms {
     }
 
     /// Send WM_DELETE_WINDOW message to close a window gracefully
-    pub fn send_delete_window<C: Connection>(
-        &self,
-        conn: &C,
-        window: Window,
-    ) -> Result<()> {
+    pub fn send_delete_window<C: Connection>(&self, conn: &C, window: Window) -> Result<()> {
         // Validate window ID
         if window == 0 {
             return Err(anyhow::anyhow!("Invalid window ID: 0"));
         }
-        
+
         // Use ClientMessageEvent::new() - the proper x11rb/XCB way
         let event = ClientMessageEvent::new(
-            32, // format (32-bit)
-            window, // destination window
-            self._wm_protocols, // message type atom
+            32,                                   // format (32-bit)
+            window,                               // destination window
+            self._wm_protocols,                   // message type atom
             [self._wm_delete_window, 0, 0, 0, 0], // data (timestamp = 0 = CurrentTime)
         );
-        
+
         // NO_EVENT is correct for XCB/x11rb ClientMessage events
         // This is the standard way per x11rb examples and XCB documentation
         if let Err(e) = conn.send_event(
-            false, // propagate
-            window, // destination
+            false,               // propagate
+            window,              // destination
             EventMask::NO_EVENT, // event_mask - correct for XCB/x11rb
             event,
         ) {
             // If window is already destroyed, that's fine - it's already closed
-            debug!("Failed to send WM_DELETE_WINDOW to window {} (may already be destroyed): {}", window, e);
+            debug!(
+                "Failed to send WM_DELETE_WINDOW to window {} (may already be destroyed): {}",
+                window, e
+            );
             // Don't return error - window closing is the desired outcome
         }
-        
+
         Ok(())
     }
-    
+
     /// Get _NET_WM_WINDOW_TYPE property for a window
     /// Returns a vector of window type atoms
-    pub fn get_window_type<C: Connection>(
-        &self,
-        conn: &C,
-        window: Window,
-    ) -> Result<Vec<Atom>> {
-        if let Ok(reply) = conn.get_property(
-            false,
-            window,
-            self.net_wm_window_type,
-            AtomEnum::ATOM,
-            0,
-            1024,
-        )?.reply() {
+    pub fn get_window_type<C: Connection>(&self, conn: &C, window: Window) -> Result<Vec<Atom>> {
+        if let Ok(reply) = conn
+            .get_property(
+                false,
+                window,
+                self.net_wm_window_type,
+                AtomEnum::ATOM,
+                0,
+                1024,
+            )?
+            .reply()
+        {
             if let Some(value32) = reply.value32() {
                 return Ok(value32.collect());
             }
         }
         Ok(vec![])
     }
-    
+
     /// Check if a window has _NET_WM_BYPASS_COMPOSITOR set to 1
     /// Returns true if the window requests compositor bypass
-    pub fn check_bypass_compositor<C: Connection>(
-        &self,
-        conn: &C,
-        window: Window,
-    ) -> Result<bool> {
-        if let Ok(reply) = conn.get_property(
-            false,
-            window,
-            self._net_wm_bypass_compositor,
-            AtomEnum::CARDINAL,
-            0,
-            1,
-        )?.reply() {
+    pub fn check_bypass_compositor<C: Connection>(&self, conn: &C, window: Window) -> Result<bool> {
+        if let Ok(reply) = conn
+            .get_property(
+                false,
+                window,
+                self._net_wm_bypass_compositor,
+                AtomEnum::CARDINAL,
+                0,
+                1,
+            )?
+            .reply()
+        {
             if let Some(mut value32) = reply.value32() {
                 if let Some(value) = value32.next() {
                     // Value 1 means bypass compositor
@@ -457,9 +439,9 @@ impl Atoms {
 /// Based on MWM (Motif Window Manager) hints specification
 #[derive(Debug, Clone, Copy)]
 pub struct MotifWmHints {
-    pub flags: u32,        // MWM_HINTS_* flags
-    pub functions: u32,    // MWM_FUNC_* bits
-    pub decorations: u32,  // MWM_DECOR_* bits
+    pub flags: u32,       // MWM_HINTS_* flags
+    pub functions: u32,   // MWM_FUNC_* bits
+    pub decorations: u32, // MWM_DECOR_* bits
 }
 
 impl Atoms {
@@ -469,7 +451,7 @@ impl Atoms {
     pub const MWM_DECOR_ALL: u32 = 1 << 0;
     pub const MWM_DECOR_BORDER: u32 = 1 << 1;
     pub const MWM_DECOR_TITLE: u32 = 1 << 3;
-    
+
     /// Get MOTIF_WM_HINTS property for a window
     /// Returns Some(MotifWmHints) if the property exists and is valid, None otherwise
     pub fn get_motif_hints<C: Connection>(
@@ -479,14 +461,17 @@ impl Atoms {
     ) -> Result<Option<MotifWmHints>> {
         // MOTIF_WM_HINTS is a property of type _MOTIF_WM_HINTS containing 5 32-bit values
         // We only need the first 3: flags, functions, decorations
-        if let Ok(reply) = conn.get_property(
-            false,
-            window,
-            self._motif_wm_hints,
-            self._motif_wm_hints, // Type is the same as the atom
-            0,
-            5, // Read up to 5 values (we only need 3)
-        )?.reply() {
+        if let Ok(reply) = conn
+            .get_property(
+                false,
+                window,
+                self._motif_wm_hints,
+                self._motif_wm_hints, // Type is the same as the atom
+                0,
+                5, // Read up to 5 values (we only need 3)
+            )?
+            .reply()
+        {
             if let Some(value32) = reply.value32() {
                 let values: Vec<u32> = value32.take(3).collect();
                 if values.len() >= 3 {
@@ -500,7 +485,7 @@ impl Atoms {
         }
         Ok(None)
     }
-    
+
     /// Check if MOTIF hints indicate the window should have decorations
     /// Returns true if decorations should be shown, false if they should be hidden
     /// Returns None if MOTIF hints are not present or don't specify decoration preference

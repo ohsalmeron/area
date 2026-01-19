@@ -1,0 +1,43 @@
+#!/bin/bash
+# Area Wayland Session Script
+# Starts the Area Wayland compositor
+
+set -e
+
+# Source environment
+if [ -f /etc/profile ]; then
+    source /etc/profile
+fi
+
+# Import environment from LightDM
+systemctl --user import-environment 2>/dev/null || true
+
+# Set runtime directory
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+mkdir -p "$XDG_RUNTIME_DIR"
+
+# Set Wayland environment
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=Area
+export WAYLAND_DISPLAY=wayland-0
+
+# Find compositor binary
+# This will be updated by setup-lightdm.sh, but we have fallbacks
+if [ -f "$HOME/Documents/GitHub/area/area-wayland/target/release/area-wayland" ]; then
+    COMPOSITOR_BIN="$HOME/Documents/GitHub/area/area-wayland/target/release/area-wayland"
+elif [ -f "$HOME/Documents/GitHub/area/area-wayland/target/debug/area-wayland" ]; then
+    COMPOSITOR_BIN="$HOME/Documents/GitHub/area/area-wayland/target/debug/area-wayland"
+elif command -v area-wayland >/dev/null 2>&1; then
+    COMPOSITOR_BIN="$(command -v area-wayland)"
+else
+    echo "Error: area-wayland binary not found" >&2
+    echo "  Please run the setup script:" >&2
+    echo "  ~/Documents/GitHub/area/session/setup-lightdm.sh" >&2
+    exit 1
+fi
+
+echo "Starting Area Wayland Compositor: $COMPOSITOR_BIN"
+echo "WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+
+# Run compositor (this will block until it exits)
+exec "$COMPOSITOR_BIN"

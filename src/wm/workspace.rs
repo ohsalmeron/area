@@ -19,13 +19,13 @@ use crate::wm::screen::ScreenInfo;
 pub struct WorkspaceManager {
     /// Current workspace index (0-based)
     pub current_workspace: u32,
-    
+
     /// Number of workspaces
     pub workspace_count: u32,
-    
+
     /// Workspace names
     pub workspace_names: Vec<String>,
-    
+
     /// Desktop layout
     pub desktop_layout: DesktopLayout,
 }
@@ -48,7 +48,7 @@ impl WorkspaceManager {
         let workspace_names = (0..workspace_count)
             .map(|i| format!("Workspace {}", i + 1))
             .collect();
-        
+
         Self {
             current_workspace: 0,
             workspace_count,
@@ -61,7 +61,7 @@ impl WorkspaceManager {
             },
         }
     }
-    
+
     /// Switch to a workspace
     pub fn switch_workspace(
         &mut self,
@@ -72,29 +72,36 @@ impl WorkspaceManager {
         clients: &mut std::collections::HashMap<u32, Client>,
     ) -> Result<()> {
         if workspace >= self.workspace_count {
-            warn!("Invalid workspace index: {} (max: {})", workspace, self.workspace_count - 1);
+            warn!(
+                "Invalid workspace index: {} (max: {})",
+                workspace,
+                self.workspace_count - 1
+            );
             return Ok(());
         }
-        
+
         if workspace == self.current_workspace {
             debug!("Already on workspace {}", workspace);
             return Ok(());
         }
-        
-        info!("Switching from workspace {} to {}", self.current_workspace, workspace);
-        
+
+        info!(
+            "Switching from workspace {} to {}",
+            self.current_workspace, workspace
+        );
+
         let old_workspace = self.current_workspace;
         self.current_workspace = workspace;
-        
+
         // Show/hide windows based on workspace
         self.update_window_visibility(conn, clients, old_workspace, workspace)?;
-        
+
         // Update EWMH properties
         self.update_ewmh_properties(conn, display_info, screen_info)?;
-        
+
         Ok(())
     }
-    
+
     /// Move window to a workspace
     pub fn move_window_to_workspace(
         &mut self,
@@ -105,14 +112,18 @@ impl WorkspaceManager {
         workspace: u32,
     ) -> Result<()> {
         if workspace != ALL_WORKSPACES && workspace >= self.workspace_count {
-            warn!("Invalid workspace index: {} (max: {})", workspace, self.workspace_count - 1);
+            warn!(
+                "Invalid workspace index: {} (max: {})",
+                workspace,
+                self.workspace_count - 1
+            );
             return Ok(());
         }
-        
+
         debug!("Moving window {} to workspace {}", client.window, workspace);
-        
+
         client.win_workspace = workspace;
-        
+
         // Update visibility if not on current workspace
         if workspace != ALL_WORKSPACES && workspace != self.current_workspace {
             // Hide window
@@ -129,7 +140,7 @@ impl WorkspaceManager {
                 conn.map_window(client.window)?;
             }
         }
-        
+
         // Update _NET_WM_DESKTOP
         conn.change_property32(
             PropMode::REPLACE,
@@ -138,10 +149,10 @@ impl WorkspaceManager {
             AtomEnum::CARDINAL,
             &[workspace],
         )?;
-        
+
         Ok(())
     }
-    
+
     /// Set workspace count
     pub fn set_workspace_count(
         &mut self,
@@ -154,29 +165,29 @@ impl WorkspaceManager {
             warn!("Cannot set workspace count to 0");
             return Ok(());
         }
-        
+
         info!("Setting workspace count to {}", count);
-        
+
         // Adjust current workspace if needed
         if self.current_workspace >= count {
             self.current_workspace = count - 1;
         }
-        
+
         // Update workspace names
         while self.workspace_names.len() < count as usize {
             let idx = self.workspace_names.len();
             self.workspace_names.push(format!("Workspace {}", idx + 1));
         }
         self.workspace_names.truncate(count as usize);
-        
+
         self.workspace_count = count;
-        
+
         // Update EWMH properties
         self.update_ewmh_properties(conn, display_info, screen_info)?;
-        
+
         Ok(())
     }
-    
+
     /// Update window visibility based on workspace
     fn update_window_visibility(
         &self,
@@ -187,12 +198,12 @@ impl WorkspaceManager {
     ) -> Result<()> {
         for client in clients.values_mut() {
             let ws = client.win_workspace;
-            
+
             // Sticky windows (ALL_WORKSPACES) are always visible
             if ws == ALL_WORKSPACES {
                 continue;
             }
-            
+
             // Hide windows from old workspace
             if ws == old_workspace {
                 if let Some(frame) = &client.frame {
@@ -201,7 +212,7 @@ impl WorkspaceManager {
                     conn.unmap_window(client.window)?;
                 }
             }
-            
+
             // Show windows for new workspace
             if ws == new_workspace {
                 if let Some(frame) = &client.frame {
@@ -211,10 +222,10 @@ impl WorkspaceManager {
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Update EWMH workspace properties
     fn update_ewmh_properties(
         &self,
@@ -230,7 +241,7 @@ impl WorkspaceManager {
             AtomEnum::CARDINAL,
             &[self.workspace_count],
         )?;
-        
+
         // Update _NET_CURRENT_DESKTOP
         conn.change_property32(
             PropMode::REPLACE,
@@ -239,13 +250,14 @@ impl WorkspaceManager {
             AtomEnum::CARDINAL,
             &[self.current_workspace],
         )?;
-        
+
         // Update _NET_DESKTOP_NAMES
-        let names: Vec<u8> = self.workspace_names
+        let names: Vec<u8> = self
+            .workspace_names
             .iter()
             .flat_map(|name| name.as_bytes().iter().copied().chain(std::iter::once(0)))
             .collect();
-        
+
         conn.change_property8(
             PropMode::REPLACE,
             screen_info.root,
@@ -253,25 +265,22 @@ impl WorkspaceManager {
             display_info.atoms._utf8_string,
             &names,
         )?;
-        
+
         Ok(())
     }
-    
+
     /// Get current workspace
     pub fn get_current_workspace(&self) -> u32 {
         self.current_workspace
     }
-    
+
     /// Get workspace count
     pub fn get_workspace_count(&self) -> u32 {
         self.workspace_count
     }
-    
+
     /// Check if window is sticky (on all workspaces)
     pub fn is_sticky(&self, client: &Client) -> bool {
         client.win_workspace == ALL_WORKSPACES
     }
 }
-
-
-

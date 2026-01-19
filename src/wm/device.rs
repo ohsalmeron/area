@@ -16,10 +16,10 @@ use crate::wm::screen::ScreenInfo;
 pub struct InputDevice {
     /// Device ID
     pub device_id: u8,
-    
+
     /// Device name
     pub name: String,
-    
+
     /// Device type
     pub device_type: DeviceType,
 }
@@ -43,7 +43,7 @@ pub enum DeviceType {
 pub struct DeviceManager {
     /// Available devices
     pub devices: Vec<InputDevice>,
-    
+
     /// XInput2 enabled
     pub xinput2_enabled: bool,
 }
@@ -56,7 +56,7 @@ impl DeviceManager {
             xinput2_enabled: false,
         }
     }
-    
+
     /// Initialize XInput2
     pub fn initialize_xinput2(
         &mut self,
@@ -66,16 +66,16 @@ impl DeviceManager {
         if display_info.extensions.have_xinput2 {
             debug!("XInput2 extension available");
             self.xinput2_enabled = true;
-            
+
             // TODO: Query XInput2 devices
             // This requires xinput2 extension bindings
         } else {
             warn!("XInput2 extension not available");
         }
-        
+
         Ok(())
     }
-    
+
     /// Get device list
     pub fn get_devices(&self) -> &[InputDevice] {
         &self.devices
@@ -87,6 +87,3 @@ impl Default for DeviceManager {
         Self::new()
     }
 }
-
-
-

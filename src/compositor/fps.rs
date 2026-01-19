@@ -27,7 +27,7 @@ impl FpsCounter {
     /// Returns Some(fps) if a new measurement is available
     pub fn tick(&mut self) -> Option<f64> {
         self.frame_count += 1;
-        
+
         let elapsed = self.last_report.elapsed();
         if elapsed >= self.report_interval {
             self.current_fps = self.frame_count as f64 / elapsed.as_secs_f64();
@@ -43,7 +43,7 @@ impl FpsCounter {
     pub fn fps(&self) -> f64 {
         self.current_fps
     }
-    
+
     /// Get the current frame count (for periodic logging)
     pub fn frame_count(&self) -> u32 {
         self.frame_count

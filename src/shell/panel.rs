@@ -1,8 +1,8 @@
 //! Panel (top/bottom bar) implementation
 
-use anyhow::Result;
 use crate::shell::logout::LogoutDialog;
 use crate::shell::render;
+use anyhow::Result;
 
 /// Panel click action
 #[derive(Debug, Clone, Copy)]
@@ -22,17 +22,17 @@ pub struct Panel {
     /// Screen dimensions
     screen_width: u16,
     screen_height: u16,
-    
+
     /// Panel configuration
     config: crate::config::PanelConfig,
-    
+
     /// Panel position (true = top, false = bottom)
     position_top: bool,
-    
+
     /// Logout button position
     logout_button_x: f32,
     logout_button_y: f32,
-    
+
     /// Launcher button position (left side)
     launcher_button_x: f32,
     launcher_button_y: f32,
@@ -42,19 +42,23 @@ impl Panel {
     pub fn new(screen_width: u16, screen_height: u16, config: crate::config::PanelConfig) -> Self {
         // Determine panel position from config
         let position_top = config.position == "top";
-        let y = if position_top { 0.0 } else { screen_height as f32 - config.height };
-        
+        let y = if position_top {
+            0.0
+        } else {
+            screen_height as f32 - config.height
+        };
+
         // Position logout button on the right (using hardcoded button sizes for now)
         const BUTTON_WIDTH: f32 = 80.0;
         const BUTTON_HEIGHT: f32 = 30.0;
         const BUTTON_PADDING: f32 = 5.0;
         let logout_button_x = screen_width as f32 - BUTTON_WIDTH - BUTTON_PADDING;
         let logout_button_y = y + (config.height - BUTTON_HEIGHT) / 2.0;
-        
+
         // Position launcher button on the left
         let launcher_button_x = BUTTON_PADDING;
         let launcher_button_y = y + (config.height - BUTTON_HEIGHT) / 2.0;
-        
+
         Self {
             screen_width,
             screen_height,
@@ -66,12 +70,17 @@ impl Panel {
             launcher_button_y,
         }
     }
-    
+
     /// Handle mouse click on panel
-    pub fn handle_click(&self, x: i16, y: i16, logout_dialog: &mut LogoutDialog) -> Result<PanelClickAction> {
+    pub fn handle_click(
+        &self,
+        x: i16,
+        y: i16,
+        logout_dialog: &mut LogoutDialog,
+    ) -> Result<PanelClickAction> {
         let fx = x as f32;
         let fy = y as f32;
-        
+
         // Check if click is on launcher button (left side)
         if render::point_in_rect(
             fx,
@@ -83,7 +92,7 @@ impl Panel {
         ) {
             return Ok(PanelClickAction::LaunchApp);
         }
-        
+
         // Check if click is on logout button
         if render::point_in_rect(
             fx,
@@ -96,15 +105,23 @@ impl Panel {
             logout_dialog.show();
             return Ok(PanelClickAction::Logout);
         }
-        
+
         Ok(PanelClickAction::None)
     }
-    
-    
+
     /// Render the panel using the renderer
-    pub fn render(&self, renderer: &crate::compositor::renderer::Renderer, screen_width: f32, screen_height: f32) {
-        let y = if self.position_top { 0.0 } else { self.screen_height as f32 - self.config.height };
-        
+    pub fn render(
+        &self,
+        renderer: &crate::compositor::renderer::Renderer,
+        screen_width: f32,
+        screen_height: f32,
+    ) {
+        let y = if self.position_top {
+            0.0
+        } else {
+            self.screen_height as f32 - self.config.height
+        };
+
         // Render panel background
         renderer.render_rectangle(
             0.0,
@@ -113,12 +130,12 @@ impl Panel {
             self.config.height,
             screen_width,
             screen_height,
-            self.config.color[0],  // r
-            self.config.color[1],  // g
-            self.config.color[2],  // b
-            self.config.opacity,   // a
+            self.config.color[0], // r
+            self.config.color[1], // g
+            self.config.color[2], // b
+            self.config.opacity,  // a
         );
-        
+
         // Render launcher button (left side)
         renderer.render_rectangle(
             self.launcher_button_x,
@@ -127,12 +144,12 @@ impl Panel {
             BUTTON_HEIGHT,
             screen_width,
             screen_height,
-            0.2,  // r
-            0.4,  // g
-            0.2,  // b
-            0.9,  // a
+            0.2, // r
+            0.4, // g
+            0.2, // b
+            0.9, // a
         );
-        
+
         // Render logout button background
         renderer.render_rectangle(
             self.logout_button_x,
@@ -141,15 +158,15 @@ impl Panel {
             BUTTON_HEIGHT,
             screen_width,
             screen_height,
-            0.4,  // r
-            0.2,  // g
-            0.2,  // b
-            0.9,  // a
+            0.4, // r
+            0.2, // g
+            0.2, // b
+            0.9, // a
         );
-        
+
         // Render button borders (simple approach: render 4 rectangles)
         let border_width = 2.0;
-        
+
         // Launcher button border (green)
         renderer.render_rectangle(
             self.launcher_button_x,
@@ -158,7 +175,10 @@ impl Panel {
             border_width,
             screen_width,
             screen_height,
-            0.3, 0.6, 0.3, 1.0,  // top border
+            0.3,
+            0.6,
+            0.3,
+            1.0, // top border
         );
         renderer.render_rectangle(
             self.launcher_button_x,
@@ -167,7 +187,10 @@ impl Panel {
             border_width,
             screen_width,
             screen_height,
-            0.3, 0.6, 0.3, 1.0,  // bottom border
+            0.3,
+            0.6,
+            0.3,
+            1.0, // bottom border
         );
         renderer.render_rectangle(
             self.launcher_button_x,
@@ -176,7 +199,10 @@ impl Panel {
             BUTTON_HEIGHT,
             screen_width,
             screen_height,
-            0.3, 0.6, 0.3, 1.0,  // left border
+            0.3,
+            0.6,
+            0.3,
+            1.0, // left border
         );
         renderer.render_rectangle(
             self.launcher_button_x + BUTTON_WIDTH - border_width,
@@ -185,9 +211,12 @@ impl Panel {
             BUTTON_HEIGHT,
             screen_width,
             screen_height,
-            0.3, 0.6, 0.3, 1.0,  // right border
+            0.3,
+            0.6,
+            0.3,
+            1.0, // right border
         );
-        
+
         // Logout button border (red)
         renderer.render_rectangle(
             self.logout_button_x,
@@ -196,7 +225,10 @@ impl Panel {
             border_width,
             screen_width,
             screen_height,
-            0.6, 0.3, 0.3, 1.0,  // top border
+            0.6,
+            0.3,
+            0.3,
+            1.0, // top border
         );
         renderer.render_rectangle(
             self.logout_button_x,
@@ -205,7 +237,10 @@ impl Panel {
             border_width,
             screen_width,
             screen_height,
-            0.6, 0.3, 0.3, 1.0,  // bottom border
+            0.6,
+            0.3,
+            0.3,
+            1.0, // bottom border
         );
         renderer.render_rectangle(
             self.logout_button_x,
@@ -214,7 +249,10 @@ impl Panel {
             BUTTON_HEIGHT,
             screen_width,
             screen_height,
-            0.6, 0.3, 0.3, 1.0,  // left border
+            0.6,
+            0.3,
+            0.3,
+            1.0, // left border
         );
         renderer.render_rectangle(
             self.logout_button_x + BUTTON_WIDTH - border_width,
@@ -223,39 +261,49 @@ impl Panel {
             BUTTON_HEIGHT,
             screen_width,
             screen_height,
-            0.6, 0.3, 0.3, 1.0,  // right border
+            0.6,
+            0.3,
+            0.3,
+            1.0, // right border
         );
-        
+
         // TODO: Render "Apps" and "Logout" text on buttons
         // For now, buttons are just colored rectangles (green = launcher, red = logout)
     }
-    
+
     /// Get panel height
     pub fn height(&self) -> f32 {
         self.config.height
     }
-    
+
     /// Check if point is on panel
     pub fn contains_point(&self, _x: i16, y: i16) -> bool {
-        let panel_y = if self.position_top { 0.0 } else { self.screen_height as f32 - self.config.height };
+        let panel_y = if self.position_top {
+            0.0
+        } else {
+            self.screen_height as f32 - self.config.height
+        };
         let fy = y as f32;
         fy >= panel_y && fy < panel_y + self.config.height
     }
-    
+
     /// Update screen size (called when screen resolution changes)
     pub fn set_screen_size(&mut self, width: u16, height: u16) {
         self.screen_width = width;
         self.screen_height = height;
-        
+
         // Recalculate button positions
         const BUTTON_WIDTH: f32 = 80.0;
         const BUTTON_HEIGHT: f32 = 30.0;
         const BUTTON_PADDING: f32 = 5.0;
-        let y = if self.position_top { 0.0 } else { height as f32 - self.config.height };
+        let y = if self.position_top {
+            0.0
+        } else {
+            height as f32 - self.config.height
+        };
         self.logout_button_x = width as f32 - BUTTON_WIDTH - BUTTON_PADDING;
         self.logout_button_y = y + (self.config.height - BUTTON_HEIGHT) / 2.0;
         self.launcher_button_x = BUTTON_PADDING;
         self.launcher_button_y = y + (self.config.height - BUTTON_HEIGHT) / 2.0;
     }
 }
-

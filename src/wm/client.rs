@@ -3,180 +3,182 @@
 //! Represents a window being managed by the window manager.
 //! This is the equivalent of xfwm4's Client structure.
 
-use std::sync::Arc;
 use crate::shared::window_state::{Geometry, WindowFrame};
-use crate::wm::client_flags::{ClientFlags, XfwmFlags, WmFlags, WindowType, WindowLayer, TilePosition};
+use crate::wm::client_flags::{
+    ClientFlags, TilePosition, WindowLayer, WindowType, WmFlags, XfwmFlags,
+};
 use crate::wm::screen::ScreenInfo;
+use std::sync::Arc;
 
 /// Window Manager client state
-/// 
+///
 /// This is the equivalent of xfwm4's Client structure.
 /// Represents a window being managed by the WM with all its state.
 pub struct Client {
     /// Reference to screen info
     pub screen_info: Option<Arc<ScreenInfo>>,
-    
+
     /// X11 window ID (client window)
     pub window: u32,
-    
+
     /// Frame window (decorations)
     pub frame: Option<WindowFrame>,
-    
+
     /// Transient for window
     pub transient_for: Option<u32>,
-    
+
     /// User time window
     pub user_time_win: Option<u32>,
-    
+
     /// Client leader window
     pub client_leader: Option<u32>,
-    
+
     /// Group leader window
     pub group_leader: Option<u32>,
-    
+
     /// Window layer (for stacking)
     pub win_layer: WindowLayer,
-    
+
     /// Initial layer (before fullscreen)
     pub initial_layer: WindowLayer,
-    
+
     /// Client serial (unique ID)
     pub serial: u64,
-    
+
     /// Ignore unmap count
     pub ignore_unmap: u32,
-    
+
     /// Window type atom
     pub type_atom: u32,
-    
+
     /// Window type
     pub type_: WindowType,
-    
+
     /// Visual ID
     pub visual: u32,
-    
+
     /// Window geometry
     pub geometry: Geometry,
-    
+
     /// Applied geometry (what we told the client)
     pub applied_geometry: Geometry,
-    
+
     /// Saved geometry (for restore)
     pub saved_geometry: Option<Geometry>,
-    
+
     /// Pre-fullscreen geometry
     pub pre_fullscreen_geometry: Option<Geometry>,
-    
+
     /// Pre-fullscreen layer
     pub pre_fullscreen_layer: WindowLayer,
-    
+
     /// Pre-relayout position (for XRandR)
     pub pre_relayout_x: i32,
     pub pre_relayout_y: i32,
-    
+
     /// Frame cache dimensions (for optimization)
     pub frame_cache_width: i32,
     pub frame_cache_height: i32,
-    
+
     /// Depth
     pub depth: u8,
-    
+
     /// Border width
     pub border_width: u16,
-    
+
     /// Gravity
     pub gravity: u8,
-    
+
     /// Workspace (0xFFFFFFFF = all workspaces/sticky)
     pub win_workspace: u32,
-    
+
     /// Blink iterations (for urgency)
     pub blink_iterations: i32,
-    
+
     /// Button status
     pub button_status: [i32; 7], // BUTTON_COUNT
-    
+
     /// Struts (for panels/docks)
     pub struts: [i32; 12], // STRUTS_SIZE
-    
+
     /// Hostname
     pub hostname: String,
-    
+
     /// Window name/title
     pub name: String,
-    
+
     /// User time
     pub user_time: u32,
-    
+
     /// Process ID
     pub pid: u32,
-    
+
     /// Ping time
     pub ping_time: u32,
-    
+
     /// Client flags
     pub flags: ClientFlags,
-    
+
     /// WM flags
     pub wm_flags: WmFlags,
-    
+
     /// XFWM flags
     pub xfwm_flags: XfwmFlags,
-    
+
     /// Fullscreen monitors [top, bottom, left, right]
     pub fullscreen_monitors: Option<[u32; 4]>,
-    
+
     /// Frame extents [left, right, top, bottom]
     pub frame_extents: [i32; 4],
-    
+
     /// Tile mode
     pub tile_mode: TilePosition,
-    
+
     /// Opacity (0-0xFFFFFFFF, 0xFFFFFFFF = opaque)
     pub opacity: u32,
-    
+
     /// Applied opacity
     pub opacity_applied: u32,
-    
+
     /// Opacity flags (which bits are applied)
     pub opacity_flags: u32,
-    
+
     /// Startup ID (for startup notification)
     pub startup_id: Option<String>,
-    
+
     /// XSync counter (if XSync enabled)
     pub xsync_counter: Option<u64>,
-    
+
     /// XSync value
     pub xsync_value: Option<u64>,
-    
+
     /// Next XSync value
     pub next_xsync_value: Option<u64>,
-    
+
     /// XSync alarm
     pub xsync_alarm: Option<u32>,
-    
+
     /// XSync timeout ID
     pub xsync_timeout_id: Option<u32>,
-    
+
     /// Colormap windows
     pub cmap_windows: Vec<u32>,
-    
+
     /// Colormap
     pub cmap: Option<u32>,
-    
+
     /// Number of colormap windows
     pub ncmap: usize,
-    
+
     /// Size hints (min/max size, increments, etc.)
     pub size_hints: Option<SizeHints>,
-    
+
     /// WM hints
     pub wm_hints: Option<WmHints>,
-    
+
     /// Class hint
     pub class_hint: Option<ClassHint>,
-    
+
     /// MWM hints (Motif)
     pub mwm_hints: Option<MwmHints>,
 }
@@ -296,55 +298,57 @@ impl Client {
             mwm_hints: None,
         }
     }
-    
+
     /// Get window ID (for compatibility)
     pub fn id(&self) -> u32 {
         self.window
     }
-    
+
     /// Get window ID as field (for compatibility with old code)
     pub fn get_id(&self) -> u32 {
         self.window
     }
-    
+
     /// Check if window is maximized
     pub fn is_maximized(&self) -> bool {
-        self.flags.contains(ClientFlags::MAXIMIZED_VERT) && self.flags.contains(ClientFlags::MAXIMIZED_HORIZ)
+        self.flags.contains(ClientFlags::MAXIMIZED_VERT)
+            && self.flags.contains(ClientFlags::MAXIMIZED_HORIZ)
     }
-    
+
     /// Check if window is fullscreen
     pub fn is_fullscreen(&self) -> bool {
         self.flags.contains(ClientFlags::FULLSCREEN)
     }
-    
+
     /// Check if window is minimized/iconified
     pub fn is_minimized(&self) -> bool {
         self.flags.contains(ClientFlags::ICONIFIED)
     }
-    
+
     /// Check if window is shaded
     pub fn is_shaded(&self) -> bool {
         self.flags.contains(ClientFlags::SHADED)
     }
-    
+
     /// Check if window is sticky (on all workspaces)
     pub fn is_sticky(&self) -> bool {
         self.flags.contains(ClientFlags::STICKY) || self.win_workspace == 0xFFFFFFFF
     }
-    
+
     /// Calculate frame geometry
     pub fn frame_geometry(&self) -> Geometry {
         if self.is_fullscreen() {
             return self.geometry;
         }
-        
+
         if let Some(_frame) = &self.frame {
             // Frame extends beyond client by frame extents
             Geometry {
                 x: self.geometry.x - self.frame_extents[0],
                 y: self.geometry.y - self.frame_extents[2],
                 width: self.geometry.width + (self.frame_extents[0] + self.frame_extents[1]) as u32,
-                height: self.geometry.height + (self.frame_extents[2] + self.frame_extents[3]) as u32,
+                height: self.geometry.height
+                    + (self.frame_extents[2] + self.frame_extents[3]) as u32,
             }
         } else {
             self.geometry
@@ -358,7 +362,7 @@ impl Client {
     pub fn geometry(&self) -> Geometry {
         self.geometry
     }
-    
+
     /// Get state flags (for compatibility)
     pub fn state(&self) -> crate::shared::window_state::WindowFlags {
         crate::shared::window_state::WindowFlags {
@@ -375,32 +379,32 @@ impl Client {
             demands_attention: self.flags.contains(ClientFlags::DEMANDS_ATTENTION),
         }
     }
-    
+
     /// Get title (for compatibility)
     pub fn title(&self) -> &str {
         &self.name
     }
-    
+
     /// Check if mapped (for compatibility)
     pub fn mapped(&self) -> bool {
         self.xfwm_flags.contains(XfwmFlags::VISIBLE)
     }
-    
+
     /// Check if focused (for compatibility)
     pub fn focused(&self) -> bool {
         self.xfwm_flags.contains(XfwmFlags::FOCUS)
     }
-    
+
     /// Get frame window ID (for compatibility)
     pub fn get_frame_window(&self) -> Option<u32> {
         self.frame.as_ref().map(|f| f.frame)
     }
-    
+
     /// Set frame (for compatibility)
     pub fn set_frame(&mut self, frame: Option<WindowFrame>) {
         self.frame = frame;
     }
-    
+
     /// Set mapped state (for compatibility)
     pub fn set_mapped(&mut self, mapped: bool) {
         if mapped {
@@ -409,7 +413,7 @@ impl Client {
             self.xfwm_flags.remove(XfwmFlags::VISIBLE);
         }
     }
-    
+
     /// Set focused state (for compatibility)
     pub fn set_focused(&mut self, focused: bool) {
         if focused {
@@ -418,17 +422,17 @@ impl Client {
             self.xfwm_flags.remove(XfwmFlags::FOCUS);
         }
     }
-    
+
     /// Get restore geometry (for compatibility - uses saved_geometry)
     pub fn restore_geometry(&self) -> Option<Geometry> {
         self.saved_geometry
     }
-    
+
     /// Set restore geometry (for compatibility - uses saved_geometry)
     pub fn set_restore_geometry(&mut self, geom: Option<Geometry>) {
         self.saved_geometry = geom;
     }
-    
+
     /// Set state flags (for compatibility)
     pub fn set_state(&mut self, state: crate::shared::window_state::WindowFlags) {
         if state.maximized {
@@ -508,7 +512,7 @@ impl<'a> StateMut<'a> {
     pub fn fullscreen(&self) -> bool {
         self.client.is_fullscreen()
     }
-    
+
     pub fn set_fullscreen(&mut self, val: bool) {
         if val {
             self.client.flags.insert(ClientFlags::FULLSCREEN);
@@ -516,15 +520,15 @@ impl<'a> StateMut<'a> {
             self.client.flags.remove(ClientFlags::FULLSCREEN);
         }
     }
-    
+
     pub fn maximized(&self) -> bool {
         self.client.is_maximized()
     }
-    
+
     pub fn minimized(&self) -> bool {
         self.client.is_minimized()
     }
-    
+
     pub fn set_minimized(&mut self, val: bool) {
         if val {
             self.client.flags.insert(ClientFlags::ICONIFIED);
@@ -532,11 +536,11 @@ impl<'a> StateMut<'a> {
             self.client.flags.remove(ClientFlags::ICONIFIED);
         }
     }
-    
+
     pub fn above(&self) -> bool {
         self.client.flags.contains(ClientFlags::ABOVE)
     }
-    
+
     pub fn set_above(&mut self, val: bool) {
         if val {
             self.client.flags.insert(ClientFlags::ABOVE);
@@ -544,11 +548,11 @@ impl<'a> StateMut<'a> {
             self.client.flags.remove(ClientFlags::ABOVE);
         }
     }
-    
+
     pub fn below(&self) -> bool {
         self.client.flags.contains(ClientFlags::BELOW)
     }
-    
+
     pub fn set_below(&mut self, val: bool) {
         if val {
             self.client.flags.insert(ClientFlags::BELOW);

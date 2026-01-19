@@ -28,7 +28,7 @@ impl TerminateManager {
             unresponsive: std::collections::HashMap::new(),
         }
     }
-    
+
     /// Show force quit dialog
     pub fn show_force_quit_dialog(
         &self,
@@ -38,39 +38,35 @@ impl TerminateManager {
         window: u32,
     ) -> Result<()> {
         debug!("Showing force quit dialog for window {}", window);
-        
+
         // TODO: Show force quit dialog
         // This would typically use GTK or another UI toolkit
-        
+
         Ok(())
     }
-    
+
     /// Force kill a window
-    pub fn force_kill(
-        &self,
-        conn: &RustConnection,
-        window: u32,
-    ) -> Result<()> {
+    pub fn force_kill(&self, conn: &RustConnection, window: u32) -> Result<()> {
         debug!("Force killing window {}", window);
-        
+
         // Use XKillClient (via x11rb)
         // Note: x11rb doesn't have XKillClient directly, so we use KillClient request
         conn.kill_client(window)?;
         conn.flush()?;
-        
+
         Ok(())
     }
-    
+
     /// Check if window is unresponsive
     pub fn is_unresponsive(&self, window: u32) -> bool {
         self.unresponsive.contains_key(&window)
     }
-    
+
     /// Mark window as unresponsive
     pub fn mark_unresponsive(&mut self, window: u32, timeout: u32) {
         self.unresponsive.insert(window, timeout);
     }
-    
+
     /// Mark window as responsive
     pub fn mark_responsive(&mut self, window: u32) {
         self.unresponsive.remove(&window);
@@ -82,6 +78,3 @@ impl Default for TerminateManager {
         Self::new()
     }
 }
-
-
-

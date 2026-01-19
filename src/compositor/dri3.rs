@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 //! DRI3/dma-buf support for zero-copy buffer sharing
-//! 
+//!
 //! This is a placeholder for future DRI3 implementation.
 //! For now, we use XGetImage as a fallback.
 
@@ -19,9 +19,7 @@ impl Dri3Manager {
         // TODO: Check for DRI3 extension availability
         // For now, mark as unavailable
         warn!("DRI3 support not yet implemented, using XGetImage fallback");
-        Ok(Self {
-            available: false,
-        })
+        Ok(Self { available: false })
     }
 
     /// Check if DRI3 is available
@@ -39,4 +37,3 @@ impl Dri3Manager {
         Err(anyhow::anyhow!("DRI3 not available"))
     }
 }
-

@@ -22,7 +22,7 @@ trait Notifications {
         hints: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
         expire_timeout: i32,
     ) -> zbus::Result<u32>;
-    
+
     /// Close a notification
     fn close_notification(&self, id: u32) -> zbus::Result<()>;
 }
@@ -36,24 +36,23 @@ impl NotificationService {
         let proxy = NotificationsProxy::new(conn).await?;
         Ok(Self { proxy })
     }
-    
+
     /// Show a simple notification
-    pub async fn show_simple(
-        &self,
-        title: &str,
-        message: &str,
-    ) -> Result<u32> {
-        let id = self.proxy.notify(
-            "Area",           // app_name
-            0,                // replaces_id (0 = new notification)
-            "dialog-information", // app_icon
-            title,            // summary
-            message,          // body
-            &[],              // actions
-            std::collections::HashMap::new(), // hints
-            5000,             // expire_timeout (5 seconds)
-        ).await?;
-        
+    pub async fn show_simple(&self, title: &str, message: &str) -> Result<u32> {
+        let id = self
+            .proxy
+            .notify(
+                "Area",                           // app_name
+                0,                                // replaces_id (0 = new notification)
+                "dialog-information",             // app_icon
+                title,                            // summary
+                message,                          // body
+                &[],                              // actions
+                std::collections::HashMap::new(), // hints
+                5000,                             // expire_timeout (5 seconds)
+            )
+            .await?;
+
         Ok(id)
     }
 }

@@ -27,7 +27,7 @@ pub struct IconData {
 pub struct IconManager {
     /// Icon cache (window -> icon data)
     pub icon_cache: HashMap<u32, IconData>,
-    
+
     /// Default icon
     pub default_icon: Option<IconData>,
 }
@@ -40,7 +40,7 @@ impl IconManager {
             default_icon: None,
         }
     }
-    
+
     /// Load icon for a window
     pub fn load_icon(
         &mut self,
@@ -49,25 +49,31 @@ impl IconManager {
         window: u32,
     ) -> Result<Option<IconData>> {
         // Try _NET_WM_ICON first
-        if let Ok(reply) = conn.get_property(
-            false,
-            window,
-            atoms._net_wm_pid, // Use _NET_WM_ICON if available
-            AtomEnum::CARDINAL,
-            0,
-            1024,
-        )?.reply() {
+        if let Ok(reply) = conn
+            .get_property(
+                false,
+                window,
+                atoms._net_wm_pid, // Use _NET_WM_ICON if available
+                AtomEnum::CARDINAL,
+                0,
+                1024,
+            )?
+            .reply()
+        {
             // TODO: Parse _NET_WM_ICON format
             // Format: width, height, pixels...
-            debug!("Loading icon for window {} (not yet fully implemented)", window);
+            debug!(
+                "Loading icon for window {} (not yet fully implemented)",
+                window
+            );
         }
-        
+
         // Try KWM_WIN_ICON (legacy)
         // TODO: Implement KWM_WIN_ICON loading
-        
+
         Ok(None)
     }
-    
+
     /// Get icon for a window (from cache or load)
     pub fn get_icon(
         &mut self,
@@ -80,15 +86,15 @@ impl IconManager {
                 self.icon_cache.insert(window, icon);
             }
         }
-        
+
         Ok(self.icon_cache.get(&window).or(self.default_icon.as_ref()))
     }
-    
+
     /// Clear icon cache
     pub fn clear_cache(&mut self) {
         self.icon_cache.clear();
     }
-    
+
     /// Remove icon from cache
     pub fn remove_icon(&mut self, window: u32) {
         self.icon_cache.remove(&window);
@@ -100,6 +106,3 @@ impl Default for IconManager {
         Self::new()
     }
 }
-
-
-

@@ -42,15 +42,29 @@ impl Renderer {
             gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
 
             // Vertex attributes: position (vec2) and texcoord (vec2)
-            gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, 4 * std::mem::size_of::<f32>() as i32, ptr::null());
+            gl::VertexAttribPointer(
+                0,
+                2,
+                gl::FLOAT,
+                gl::FALSE,
+                4 * std::mem::size_of::<f32>() as i32,
+                ptr::null(),
+            );
             gl::EnableVertexAttribArray(0);
-            gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, 4 * std::mem::size_of::<f32>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
+            gl::VertexAttribPointer(
+                1,
+                2,
+                gl::FLOAT,
+                gl::FALSE,
+                4 * std::mem::size_of::<f32>() as i32,
+                (2 * std::mem::size_of::<f32>()) as *const _,
+            );
             gl::EnableVertexAttribArray(1);
 
             gl::BindVertexArray(0);
 
             info!("OpenGL renderer initialized");
-            
+
             // Create a 1x1 white texture for solid color rendering
             let mut white_texture = 0;
             gl::GenTextures(1, &mut white_texture);
@@ -119,10 +133,10 @@ impl Renderer {
             let vs = Self::compile_shader(vertex_shader, gl::VERTEX_SHADER)?;
             let fs = Self::compile_shader(fragment_shader, gl::FRAGMENT_SHADER)?;
             let program = Self::link_program(vs, fs)?;
-            
+
             gl::DeleteShader(vs);
             gl::DeleteShader(fs);
-            
+
             Ok(program)
         }
     }
@@ -176,9 +190,15 @@ impl Renderer {
     }
 
     /// Create or update texture for a window using TFP
-    /// 
+    ///
     /// Returns the old X11 Pixmap ID if one was replaced, so it can be freed by the caller.
-    pub fn update_window_pixmap(&mut self, ctx: &super::gl_context::GlContext, window_id: u32, x11_pixmap: u32, depth: u8) -> Result<Option<u32>> {
+    pub fn update_window_pixmap(
+        &mut self,
+        ctx: &super::gl_context::GlContext,
+        window_id: u32,
+        x11_pixmap: u32,
+        depth: u8,
+    ) -> Result<Option<u32>> {
         unsafe {
             // Check if this appears to be the same pixmap (optimization)
             if let Some(win_tex) = self.textures.get(&window_id) {
@@ -190,15 +210,29 @@ impl Renderer {
             }
 
             // Transactional: Create new GLX pixmap FIRST
-            trace!("Creating GLX pixmap for window {} (X11 pixmap {}, depth {})", window_id, x11_pixmap, depth);
+            trace!(
+                "Creating GLX pixmap for window {} (X11 pixmap {}, depth {})",
+                window_id, x11_pixmap, depth
+            );
             let new_glx_pixmap = match ctx.create_glx_pixmap(x11_pixmap, depth) {
                 Ok(glx_pixmap) => {
-                    trace!("Successfully created GLX pixmap {} for window {}", glx_pixmap, window_id);
+                    trace!(
+                        "Successfully created GLX pixmap {} for window {}",
+                        glx_pixmap, window_id
+                    );
                     glx_pixmap
                 }
                 Err(e) => {
-                    warn!("Failed to create GLX pixmap for X11 pixmap {} (window {}, depth {}): {}", x11_pixmap, window_id, depth, e);
-                    return Err(e).with_context(|| format!("Failed to create GLX pixmap for X11 pixmap {} (window {}, depth {})", x11_pixmap, window_id, depth));
+                    warn!(
+                        "Failed to create GLX pixmap for X11 pixmap {} (window {}, depth {}): {}",
+                        x11_pixmap, window_id, depth, e
+                    );
+                    return Err(e).with_context(|| {
+                        format!(
+                            "Failed to create GLX pixmap for X11 pixmap {} (window {}, depth {})",
+                            x11_pixmap, window_id, depth
+                        )
+                    });
                 }
             };
 
@@ -209,45 +243,61 @@ impl Renderer {
                     ctx.release_tex_image(old_glx);
                     ctx.destroy_glx_pixmap(old_glx);
                 }
-                
+
                 let old_x11 = win_tex.x11_pixmap;
-                
+
                 // Note: We use damage-based binding (bind when damaged=true)
                 // The window will be marked as damaged when pixmap is created, ensuring initial bind
-                trace!("Created GLX pixmap {} for existing texture {} for window {} (will bind on damage)", new_glx_pixmap, win_tex.texture, window_id);
+                trace!(
+                    "Created GLX pixmap {} for existing texture {} for window {} (will bind on damage)",
+                    new_glx_pixmap, win_tex.texture, window_id
+                );
 
                 win_tex.glx_pixmap = Some(new_glx_pixmap);
                 win_tex.x11_pixmap = Some(x11_pixmap);
-                trace!("Updated texture for window {} - glx_pixmap={:?}, texture={}", window_id, win_tex.glx_pixmap, win_tex.texture);
-                
+                trace!(
+                    "Updated texture for window {} - glx_pixmap={:?}, texture={}",
+                    window_id, win_tex.glx_pixmap, win_tex.texture
+                );
+
                 Ok(old_x11)
             } else {
                 // New texture
                 let mut texture = 0;
                 gl::GenTextures(1, &mut texture);
-                
+
                 gl::BindTexture(gl::TEXTURE_2D, texture);
-                
+
                 // TFP parameters
                 gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
                 gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
                 gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
                 gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
-                
+
                 // Note: We use damage-based binding (bind when damaged=true)
                 // The window will be marked as damaged when pixmap is created, ensuring initial bind
-                trace!("Created GLX pixmap {} for new texture {} for window {} (will bind on damage)", new_glx_pixmap, texture, window_id);
+                trace!(
+                    "Created GLX pixmap {} for new texture {} for window {} (will bind on damage)",
+                    new_glx_pixmap, texture, window_id
+                );
                 gl::BindTexture(gl::TEXTURE_2D, 0);
 
                 // Get pixmap dimensions for tracking
                 // We'll get this from the window geometry later if needed
-                self.textures.insert(window_id, WindowTexture {
-                    texture,
-                    glx_pixmap: Some(new_glx_pixmap),
-                    x11_pixmap: Some(x11_pixmap),
-                });
-                
-                trace!("Inserted texture for window {} into HashMap - has_texture now returns: {}", window_id, self.has_texture(window_id));
+                self.textures.insert(
+                    window_id,
+                    WindowTexture {
+                        texture,
+                        glx_pixmap: Some(new_glx_pixmap),
+                        x11_pixmap: Some(x11_pixmap),
+                    },
+                );
+
+                trace!(
+                    "Inserted texture for window {} into HashMap - has_texture now returns: {}",
+                    window_id,
+                    self.has_texture(window_id)
+                );
 
                 Ok(None)
             }
@@ -266,7 +316,7 @@ impl Renderer {
         screen_width: f32,
         screen_height: f32,
         opacity: f32,
-        damaged: bool, // Only bind texture if window is damaged
+        damaged: bool,            // Only bind texture if window is damaged
         frames_since_pixmap: u32, // Number of frames since pixmap was created
     ) {
         let win_tex = match self.textures.get(&window_id) {
@@ -275,7 +325,10 @@ impl Renderer {
                 t
             }
             None => {
-                warn!("render_window called for window {} but no texture exists in HashMap!", window_id);
+                warn!(
+                    "render_window called for window {} but no texture exists in HashMap!",
+                    window_id
+                );
                 return; // No texture yet
             }
         };
@@ -292,7 +345,8 @@ impl Renderer {
             // Set uniforms
             let pos_loc = gl::GetUniformLocation(self.program, b"uPosition\0".as_ptr() as *const _);
             let size_loc = gl::GetUniformLocation(self.program, b"uSize\0".as_ptr() as *const _);
-            let opacity_loc = gl::GetUniformLocation(self.program, b"uOpacity\0".as_ptr() as *const _);
+            let opacity_loc =
+                gl::GetUniformLocation(self.program, b"uOpacity\0".as_ptr() as *const _);
             let tex_loc = gl::GetUniformLocation(self.program, b"uTexture\0".as_ptr() as *const _);
 
             gl::Uniform2f(pos_loc, x_gl, y_gl);
@@ -303,7 +357,7 @@ impl Renderer {
             // Bind texture with per-frame TFP binding (strictBinding mode)
             gl::ActiveTexture(gl::TEXTURE0);
             gl::BindTexture(gl::TEXTURE_2D, win_tex.texture);
-            
+
             // CRITICAL: Bind the pixmap image EVERY FRAME for GLX TFP
             // Unlike XRender (used by xfwm4), GLX TFP requires binding textures to get pixmap content
             // The X server updates the pixmap content when window is damaged, and binding makes it available to GL
@@ -311,32 +365,32 @@ impl Renderer {
             // This is necessary because damage events may be delayed or missed, and TFP requires explicit binding
             if let Some(glx_pixmap) = win_tex.glx_pixmap {
                 // Clear any previous X errors before binding
+                use super::gl_context::{X_ERROR_CODE, X_ERROR_OCCURRED};
                 use std::sync::atomic::Ordering;
-                use super::gl_context::{X_ERROR_OCCURRED, X_ERROR_CODE};
                 X_ERROR_OCCURRED.store(false, Ordering::Relaxed);
                 X_ERROR_CODE.store(0, Ordering::Relaxed);
-                
+
                 // Bind the pixmap to the texture (this updates the texture with pixmap content)
                 // glXBindTexImageEXT replaces any existing binding
                 // We bind every frame to ensure we always have the latest content
                 ctx.bind_tex_image(glx_pixmap);
-                
+
                 // Check for X errors after binding
                 if X_ERROR_OCCURRED.load(Ordering::Relaxed) {
                     let error_code = X_ERROR_CODE.load(Ordering::Relaxed);
-                    warn!("X Error during bind_tex_image for window {} (glx_pixmap {}): code={}", window_id, glx_pixmap, error_code);
+                    warn!(
+                        "X Error during bind_tex_image for window {} (glx_pixmap {}): code={}",
+                        window_id, glx_pixmap, error_code
+                    );
                     X_ERROR_OCCURRED.store(false, Ordering::Relaxed);
                 }
             }
 
             // Render quad
             gl::BindVertexArray(self.vao);
-            
+
             let vertices: [f32; 16] = [
-                0.0, 0.0, 0.0, 1.0,
-                1.0, 0.0, 1.0, 1.0,
-                1.0, 1.0, 1.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0,
             ];
 
             gl::BindBuffer(gl::ARRAY_BUFFER, self.vbo);
@@ -348,29 +402,31 @@ impl Renderer {
             );
 
             gl::DrawArrays(gl::TRIANGLE_FAN, 0, 4);
-            
+
             // CRITICAL: Release the pixmap image AFTER drawing (like Compiz strictBinding)
             if let Some(glx_pixmap) = win_tex.glx_pixmap {
                 ctx.release_tex_image(glx_pixmap);
             }
-            
+
             gl::BindVertexArray(0);
             gl::BindTexture(gl::TEXTURE_2D, 0);
-            
+
             // Check for OpenGL errors
             let err = gl::GetError();
             if err != gl::NO_ERROR {
-                warn!("OpenGL error after rendering window {}: 0x{:x}", window_id, err);
+                warn!(
+                    "OpenGL error after rendering window {}: 0x{:x}",
+                    window_id, err
+                );
             }
         }
     }
-
 
     /// Check if texture exists for window
     pub fn has_texture(&self, window_id: u32) -> bool {
         self.textures.contains_key(&window_id)
     }
-    
+
     /// Remove texture for a window (e.g., when geometry changes significantly)
     pub fn remove_texture(&mut self, ctx: &super::gl_context::GlContext, window_id: u32) {
         if let Some(win_tex) = self.textures.remove(&window_id) {
@@ -383,10 +439,13 @@ impl Renderer {
                 // Delete OpenGL texture
                 gl::DeleteTextures(1, &win_tex.texture);
             }
-            debug!("Removed texture for window {} (geometry changed)", window_id);
+            debug!(
+                "Removed texture for window {} (geometry changed)",
+                window_id
+            );
         }
     }
-    
+
     /// Render a window as a fallback (colored rectangle) when texture is not available
     /// This ensures windows are visible even if GLX pixmap creation failed
     pub fn render_window_fallback(
@@ -402,41 +461,42 @@ impl Renderer {
     ) {
         unsafe {
             gl::UseProgram(self.program);
-            
+
             // Convert X11 coordinates (top-left origin) to OpenGL coordinates (bottom-left origin, normalized)
             // Position is top-left corner, size is width x height
             let x_gl = (x / screen_width) * 2.0 - 1.0;
             let y_gl = 1.0 - ((y + height) / screen_height) * 2.0; // Flip Y axis
             let width_gl = (width / screen_width) * 2.0;
             let height_gl = (height / screen_height) * 2.0;
-            
+
             // Set uniforms
             let pos_loc = gl::GetUniformLocation(self.program, b"uPosition\0".as_ptr() as *const _);
             let size_loc = gl::GetUniformLocation(self.program, b"uSize\0".as_ptr() as *const _);
-            let opacity_loc = gl::GetUniformLocation(self.program, b"uOpacity\0".as_ptr() as *const _);
+            let opacity_loc =
+                gl::GetUniformLocation(self.program, b"uOpacity\0".as_ptr() as *const _);
             let tex_loc = gl::GetUniformLocation(self.program, b"uTexture\0".as_ptr() as *const _);
-            
+
             gl::Uniform2f(pos_loc, x_gl, y_gl);
             gl::Uniform2f(size_loc, width_gl, height_gl);
             gl::Uniform1f(opacity_loc, 1.0); // Fully opaque - make windows clearly visible
             gl::Uniform1i(tex_loc, 0);
-            
+
             // Use white texture or solid color
             gl::ActiveTexture(gl::TEXTURE0);
             gl::BindTexture(gl::TEXTURE_2D, 0);
-            
+
             // Render quad using same method as render_window
             gl::BindVertexArray(self.vao);
-            
+
             // Use same vertex format as render_window (position + texcoord)
             let vertices: [f32; 16] = [
                 // Position      TexCoord
-                0.0, 0.0,        0.0, 1.0, // Bottom-left
-                1.0, 0.0,        1.0, 1.0, // Bottom-right
-                1.0, 1.0,        1.0, 0.0, // Top-right
-                0.0, 1.0,        0.0, 0.0, // Top-left
+                0.0, 0.0, 0.0, 1.0, // Bottom-left
+                1.0, 0.0, 1.0, 1.0, // Bottom-right
+                1.0, 1.0, 1.0, 0.0, // Top-right
+                0.0, 1.0, 0.0, 0.0, // Top-left
             ];
-            
+
             gl::BindBuffer(gl::ARRAY_BUFFER, self.vbo);
             gl::BufferData(
                 gl::ARRAY_BUFFER,
@@ -444,20 +504,23 @@ impl Renderer {
                 vertices.as_ptr() as *const _,
                 gl::DYNAMIC_DRAW,
             );
-            
+
             gl::DrawArrays(gl::TRIANGLE_FAN, 0, 4);
-            
+
             gl::BindVertexArray(0);
             gl::BindTexture(gl::TEXTURE_2D, 0);
-            
+
             // Check for OpenGL errors
             let err = gl::GetError();
             if err != gl::NO_ERROR {
-                warn!("OpenGL error after rendering fallback window {}: 0x{:x}", window_id, err);
+                warn!(
+                    "OpenGL error after rendering fallback window {}: 0x{:x}",
+                    window_id, err
+                );
             }
         }
     }
-    
+
     /// Render a colored rectangle (for shell UI)
     pub fn render_rectangle(
         &self,
@@ -474,23 +537,24 @@ impl Renderer {
     ) {
         unsafe {
             gl::UseProgram(self.program);
-            
+
             // Convert screen coordinates to OpenGL normalized coordinates
             let x_gl = (x / screen_width) * 2.0 - 1.0;
             let y_gl = 1.0 - ((y + height) / screen_height) * 2.0;
             let width_gl = (width / screen_width) * 2.0;
             let height_gl = (height / screen_height) * 2.0;
-            
+
             // Set uniforms
             let pos_loc = gl::GetUniformLocation(self.program, b"uPosition\0".as_ptr() as *const _);
             let size_loc = gl::GetUniformLocation(self.program, b"uSize\0".as_ptr() as *const _);
-            let opacity_loc = gl::GetUniformLocation(self.program, b"uOpacity\0".as_ptr() as *const _);
+            let opacity_loc =
+                gl::GetUniformLocation(self.program, b"uOpacity\0".as_ptr() as *const _);
             let tex_loc = gl::GetUniformLocation(self.program, b"uTexture\0".as_ptr() as *const _);
-            
+
             gl::Uniform2f(pos_loc, x_gl, y_gl);
             gl::Uniform2f(size_loc, width_gl, height_gl);
             gl::Uniform1f(opacity_loc, a);
-            
+
             // Create a 1x1 colored texture for this specific color
             // TODO: Cache colored textures to avoid creating/deleting every frame
             let mut color_texture = 0;
@@ -515,20 +579,17 @@ impl Renderer {
             );
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
-            
+
             gl::ActiveTexture(gl::TEXTURE0);
             gl::Uniform1i(tex_loc, 0);
-            
+
             // Render quad
             gl::BindVertexArray(self.vao);
-            
+
             let vertices: [f32; 16] = [
-                0.0, 0.0, 0.0, 1.0,
-                1.0, 0.0, 1.0, 1.0,
-                1.0, 1.0, 1.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0,
             ];
-            
+
             gl::BindBuffer(gl::ARRAY_BUFFER, self.vbo);
             gl::BufferData(
                 gl::ARRAY_BUFFER,
@@ -536,16 +597,16 @@ impl Renderer {
                 vertices.as_ptr() as *const _,
                 gl::DYNAMIC_DRAW,
             );
-            
+
             gl::DrawArrays(gl::TRIANGLE_FAN, 0, 4);
             gl::BindVertexArray(0);
             gl::BindTexture(gl::TEXTURE_2D, 0);
-            
+
             // Clean up temporary texture
             gl::DeleteTextures(1, &color_texture);
         }
     }
-    
+
     /// Update cursor texture from pixel data
     pub fn update_cursor_texture(
         &self,
@@ -560,9 +621,9 @@ impl Renderer {
                 gl::GenTextures(1, &mut tex_id);
                 *texture_id = Some(tex_id);
             }
-            
+
             gl::BindTexture(gl::TEXTURE_2D, tex_id);
-            
+
             // Upload pixel data (ARGB32 format from XFixes)
             gl::TexImage2D(
                 gl::TEXTURE_2D,
@@ -575,7 +636,7 @@ impl Renderer {
                 gl::UNSIGNED_BYTE,
                 pixels.as_ptr() as *const _,
             );
-            
+
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
@@ -583,7 +644,7 @@ impl Renderer {
             gl::BindTexture(gl::TEXTURE_2D, 0);
         }
     }
-    
+
     /// Render cursor texture at specified position
     pub fn render_cursor(
         &self,
@@ -598,39 +659,37 @@ impl Renderer {
         unsafe {
             // Render the texture
             gl::UseProgram(self.program);
-            
+
             // Convert screen coordinates to OpenGL normalized coordinates
             let x_gl = (x / screen_width) * 2.0 - 1.0;
             let y_gl = 1.0 - ((y + height) / screen_height) * 2.0;
             let width_gl = (width / screen_width) * 2.0;
             let height_gl = (height / screen_height) * 2.0;
-            
+
             // Set uniforms
             let pos_loc = gl::GetUniformLocation(self.program, b"uPosition\0".as_ptr() as *const _);
             let size_loc = gl::GetUniformLocation(self.program, b"uSize\0".as_ptr() as *const _);
-            let opacity_loc = gl::GetUniformLocation(self.program, b"uOpacity\0".as_ptr() as *const _);
+            let opacity_loc =
+                gl::GetUniformLocation(self.program, b"uOpacity\0".as_ptr() as *const _);
             let tex_loc = gl::GetUniformLocation(self.program, b"uTexture\0".as_ptr() as *const _);
-            
+
             gl::Uniform2f(pos_loc, x_gl, y_gl);
             gl::Uniform2f(size_loc, width_gl, height_gl);
             gl::Uniform1f(opacity_loc, 1.0);
-            
+
             gl::ActiveTexture(gl::TEXTURE0);
             if let Some(tex_id) = texture_id {
                 gl::BindTexture(gl::TEXTURE_2D, tex_id);
             }
             gl::Uniform1i(tex_loc, 0);
-            
+
             // Render quad
             gl::BindVertexArray(self.vao);
-            
+
             let vertices: [f32; 16] = [
-                0.0, 0.0, 0.0, 1.0,
-                1.0, 0.0, 1.0, 1.0,
-                1.0, 1.0, 1.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0,
             ];
-            
+
             gl::BindBuffer(gl::ARRAY_BUFFER, self.vbo);
             gl::BufferData(
                 gl::ARRAY_BUFFER,
@@ -638,7 +697,7 @@ impl Renderer {
                 vertices.as_ptr() as *const _,
                 gl::DYNAMIC_DRAW,
             );
-            
+
             gl::DrawArrays(gl::TRIANGLE_FAN, 0, 4);
             gl::BindVertexArray(0);
             gl::BindTexture(gl::TEXTURE_2D, 0);

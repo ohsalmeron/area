@@ -85,7 +85,7 @@ impl ClientFlags {
     pub fn maximized() -> Self {
         Self::MAXIMIZED_VERT | Self::MAXIMIZED_HORIZ
     }
-    
+
     pub fn is_maximized(&self) -> bool {
         self.contains(Self::MAXIMIZED_VERT) && self.contains(Self::MAXIMIZED_HORIZ)
     }
@@ -171,4 +171,3 @@ pub enum TilePosition {
     UpLeft,
     UpRight,
 }
-

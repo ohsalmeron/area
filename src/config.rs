@@ -35,7 +35,7 @@ impl Config {
     /// Load configuration from file, or use defaults if file doesn't exist
     pub fn load() -> Result<Self> {
         let config_path = Self::config_path()?;
-        
+
         if !config_path.exists() {
             info!("Config file not found at {:?}, using defaults", config_path);
             // Auto-generate default config file
@@ -44,43 +44,39 @@ impl Config {
             }
             return Ok(Self::default());
         }
-        
-        let content = fs::read_to_string(&config_path)
-            .context("Failed to read config file")?;
-        
-        let config: Config = toml::from_str(&content)
-            .context("Failed to parse config file")?;
-        
+
+        let content = fs::read_to_string(&config_path).context("Failed to read config file")?;
+
+        let config: Config = toml::from_str(&content).context("Failed to parse config file")?;
+
         info!("Configuration loaded from {:?}", config_path);
         debug!("Config: {:?}", config);
-        
+
         Ok(config)
     }
-    
+
     /// Get the path to the config file
     fn config_path() -> Result<PathBuf> {
         let config_dir = dirs::config_dir()
             .context("Failed to get config directory")?
             .join("area");
-        
+
         Ok(config_dir.join("config.toml"))
     }
-    
+
     /// Save default configuration to file
     fn save_default(path: &PathBuf) -> Result<()> {
         // Create config directory if it doesn't exist
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .context("Failed to create config directory")?;
+            fs::create_dir_all(parent).context("Failed to create config directory")?;
         }
-        
+
         let default_config = Self::default();
         let toml_string = toml::to_string_pretty(&default_config)
             .context("Failed to serialize default config")?;
-        
-        fs::write(path, toml_string)
-            .context("Failed to write default config file")?;
-        
+
+        fs::write(path, toml_string).context("Failed to write default config file")?;
+
         info!("Created default config file at {:?}", path);
         Ok(())
     }
@@ -118,7 +114,7 @@ pub struct MouseConfig {
 impl Default for MouseConfig {
     fn default() -> Self {
         Self {
-            accel_speed: None, // System default
+            accel_speed: None,   // System default
             accel_profile: None, // System default
             left_handed: Some(false),
             natural_scrolling: Some(false),
@@ -323,8 +319,3 @@ impl Default for TransparencyConfig {
         }
     }
 }
-
-
-
-
-

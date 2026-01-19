@@ -62,7 +62,7 @@ pub struct KeyBinding {
 pub struct KeyboardManager {
     /// Key bindings
     pub bindings: HashMap<(u16, u8), KeyboardAction>,
-    
+
     /// Modifier mapping
     pub mod_map: ModifierMap,
 }
@@ -70,8 +70,8 @@ pub struct KeyboardManager {
 /// Modifier key mapping
 #[derive(Debug, Clone)]
 pub struct ModifierMap {
-    pub mod1: u16,  // Alt
-    pub mod4: u16,  // Super/Windows
+    pub mod1: u16, // Alt
+    pub mod4: u16, // Super/Windows
     pub control: u16,
     pub shift: u16,
 }
@@ -81,28 +81,28 @@ impl KeyboardManager {
     pub fn new(conn: &RustConnection) -> Result<Self> {
         // Get modifier mapping
         let mod_map = Self::get_modifier_map_internal(conn)?;
-        
+
         let mut manager = Self {
             bindings: HashMap::new(),
             mod_map,
         };
-        
+
         // Set up default bindings
         manager.setup_default_bindings()?;
-        
+
         Ok(manager)
     }
-    
+
     /// Get modifier key mapping (internal helper)
     fn get_modifier_map_internal(conn: &RustConnection) -> Result<ModifierMap> {
         let setup = conn.setup();
-        
+
         // Find modifier keys (simplified - xfwm4 uses XkbGetModifierMap)
         let mod1 = 1 << 3; // Mod1 (Alt) - typically bit 3
         let mod4 = 1 << 6; // Mod4 (Super) - typically bit 6
         let control = 1 << 2; // Control - typically bit 2
         let shift = 1 << 0; // Shift - typically bit 0
-        
+
         Ok(ModifierMap {
             mod1,
             mod4,
@@ -110,7 +110,7 @@ impl KeyboardManager {
             shift,
         })
     }
-    
+
     /// Set up default key bindings
     fn setup_default_bindings(&mut self) -> Result<()> {
         // Default xfwm4 bindings would go here
@@ -118,7 +118,7 @@ impl KeyboardManager {
         debug!("Setting up default keyboard bindings");
         Ok(())
     }
-    
+
     /// Add a key binding
     pub fn add_binding(
         &mut self,
@@ -128,9 +128,11 @@ impl KeyboardManager {
         keycode: u8,
         action: KeyboardAction,
     ) -> Result<()> {
-        debug!("Adding key binding: modifiers={:x}, keycode={}, action={:?}", 
-            modifiers, keycode, action);
-        
+        debug!(
+            "Adding key binding: modifiers={:x}, keycode={}, action={:?}",
+            modifiers, keycode, action
+        );
+
         // Grab key
         conn.grab_key(
             true,
@@ -140,12 +142,12 @@ impl KeyboardManager {
             GrabMode::ASYNC,
             GrabMode::ASYNC,
         )?;
-        
+
         self.bindings.insert((modifiers, keycode), action);
-        
+
         Ok(())
     }
-    
+
     /// Remove a key binding
     pub fn remove_binding(
         &mut self,
@@ -154,28 +156,26 @@ impl KeyboardManager {
         modifiers: u16,
         keycode: u8,
     ) -> Result<()> {
-        debug!("Removing key binding: modifiers={:x}, keycode={}", modifiers, keycode);
-        
+        debug!(
+            "Removing key binding: modifiers={:x}, keycode={}",
+            modifiers, keycode
+        );
+
         // Ungrab key
         conn.ungrab_key(keycode, screen_info.root, ModMask::from(modifiers))?;
-        
+
         self.bindings.remove(&(modifiers, keycode));
-        
+
         Ok(())
     }
-    
+
     /// Handle key press
-    pub fn handle_key_press(
-        &self,
-        modifiers: u16,
-        keycode: u8,
-    ) -> Option<KeyboardAction> {
+    pub fn handle_key_press(&self, modifiers: u16, keycode: u8) -> Option<KeyboardAction> {
         self.bindings.get(&(modifiers, keycode)).copied()
     }
-    
+
     /// Get modifier map
     pub fn get_modifier_map(&self) -> &ModifierMap {
         &self.mod_map
     }
 }
-

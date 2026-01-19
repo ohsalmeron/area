@@ -6,55 +6,61 @@ use crate::shared::Geometry;
 pub struct CWindow {
     /// ID of window to paint (client or frame)
     pub id: u32,
-    
+
     /// Reference to X11 client window ID
     /// If this is a frame, this points to the client content window
     /// If this is a client (unframed), it's the same as `id`
-    /// 
+    ///
     /// WHY: Provides link from CWindow back to Client for geometry lookups  
     /// PLAN: Will be used in frame geometry calculations and Client state sync
     #[allow(dead_code)]
     pub client_id: u32,
-    
+
     /// Window geometry (position and size)
     pub geometry: Geometry,
-    
+
     /// Window border width (from X11 GetGeometry reply)
     pub border_width: u16,
-    
+
     /// Is the window viewable (mapped and visible)?
     pub viewable: bool,
-    
+
     /// Pixmap ID for off-screen rendering
     pub pixmap: Option<u32>,
-    
+
     /// Damage object ID for change tracking
     pub damage: Option<u32>,
-    
+
     /// Window opacity (0.0 - 1.0)
     pub opacity: f32,
-    
+
     /// Is the window damaged and needs redraw?
     pub damaged: bool,
-    
+
     /// Number of frames since pixmap was created (for fallback binding)
     pub frames_since_pixmap: u32,
-    
+
     /// Has pixmap binding failed?
     pub bind_failed: bool,
-    
+
     /// Have we logged the bind failure? (prevents log spam)
     pub bind_failure_logged: bool,
-    
+
     /// Is the window redirected?
     pub redirected: bool,
-    
+
     /// Is the window unredirected (bypassing compositor)?
     pub unredirected: bool,
 }
 
 impl CWindow {
-    pub fn new(id: u32, client_id: u32, geometry: Geometry, border_width: u16, viewable: bool) -> Self {
+    pub fn new(
+        id: u32,
+        client_id: u32,
+        geometry: Geometry,
+        border_width: u16,
+        viewable: bool,
+    ) -> Self {
         Self {
             id,
             client_id,

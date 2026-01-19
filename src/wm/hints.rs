@@ -61,14 +61,17 @@ impl HintsManager {
         atoms: &Atoms,
         window: u32,
     ) -> Result<Option<SizeHints>> {
-        if let Ok(reply) = conn.get_property(
-            false,
-            window,
-            atoms._wm_size_hints,
-            atoms._wm_size_hints,
-            0,
-            18, // XSizeHints has 18 32-bit values
-        )?.reply() {
+        if let Ok(reply) = conn
+            .get_property(
+                false,
+                window,
+                atoms._wm_size_hints,
+                atoms._wm_size_hints,
+                0,
+                18, // XSizeHints has 18 32-bit values
+            )?
+            .reply()
+        {
             if let Some(value32) = reply.value32() {
                 let values: Vec<u32> = value32.take(18).collect();
                 if values.len() >= 18 {
@@ -97,21 +100,24 @@ impl HintsManager {
         }
         Ok(None)
     }
-    
+
     /// Read WM hints for a window
     pub fn read_wm_hints(
         conn: &RustConnection,
         atoms: &Atoms,
         window: u32,
     ) -> Result<Option<WmHints>> {
-        if let Ok(reply) = conn.get_property(
-            false,
-            window,
-            atoms._wm_state,
-            atoms._wm_state,
-            0,
-            9, // XWMHints has 9 32-bit values
-        )?.reply() {
+        if let Ok(reply) = conn
+            .get_property(
+                false,
+                window,
+                atoms._wm_state,
+                atoms._wm_state,
+                0,
+                9, // XWMHints has 9 32-bit values
+            )?
+            .reply()
+        {
             if let Some(value32) = reply.value32() {
                 let values: Vec<u32> = value32.take(9).collect();
                 if values.len() >= 9 {
@@ -119,51 +125,75 @@ impl HintsManager {
                         flags: values[0],
                         input: (values[1] & 1) != 0,
                         initial_state: values[2],
-                        icon_pixmap: if values[3] != 0 { Some(values[3]) } else { None },
-                        icon_window: if values[4] != 0 { Some(values[4]) } else { None },
+                        icon_pixmap: if values[3] != 0 {
+                            Some(values[3])
+                        } else {
+                            None
+                        },
+                        icon_window: if values[4] != 0 {
+                            Some(values[4])
+                        } else {
+                            None
+                        },
                         icon_x: values[5] as i32,
                         icon_y: values[6] as i32,
-                        icon_mask: if values[7] != 0 { Some(values[7]) } else { None },
-                        window_group: if values[8] != 0 { Some(values[8]) } else { None },
+                        icon_mask: if values[7] != 0 {
+                            Some(values[7])
+                        } else {
+                            None
+                        },
+                        window_group: if values[8] != 0 {
+                            Some(values[8])
+                        } else {
+                            None
+                        },
                     }));
                 }
             }
         }
         Ok(None)
     }
-    
+
     /// Apply size hints to geometry
-    pub fn apply_size_hints(
-        &self,
-        hints: &SizeHints,
-        geometry: &Geometry,
-    ) -> Geometry {
+    pub fn apply_size_hints(&self, hints: &SizeHints, geometry: &Geometry) -> Geometry {
         let mut new_geom = *geometry;
-        
+
         // Apply min/max size constraints
-        if (hints.flags & (1 << 4)) != 0 { // PMinSize
+        if (hints.flags & (1 << 4)) != 0 {
+            // PMinSize
             new_geom.width = new_geom.width.max(hints.min_width);
             new_geom.height = new_geom.height.max(hints.min_height);
         }
-        
-        if (hints.flags & (1 << 5)) != 0 { // PMaxSize
+
+        if (hints.flags & (1 << 5)) != 0 {
+            // PMaxSize
             new_geom.width = new_geom.width.min(hints.max_width);
             new_geom.height = new_geom.height.min(hints.max_height);
         }
-        
+
         // Apply size increments
-        if (hints.flags & (1 << 8)) != 0 && hints.width_inc > 0 { // PResizeInc
-            let base = if (hints.flags & (1 << 9)) != 0 { hints.base_width } else { 0 };
+        if (hints.flags & (1 << 8)) != 0 && hints.width_inc > 0 {
+            // PResizeInc
+            let base = if (hints.flags & (1 << 9)) != 0 {
+                hints.base_width
+            } else {
+                0
+            };
             let diff = new_geom.width.saturating_sub(base);
             new_geom.width = base + (diff / hints.width_inc) * hints.width_inc;
         }
-        
-        if (hints.flags & (1 << 8)) != 0 && hints.height_inc > 0 { // PResizeInc
-            let base = if (hints.flags & (1 << 9)) != 0 { hints.base_height } else { 0 };
+
+        if (hints.flags & (1 << 8)) != 0 && hints.height_inc > 0 {
+            // PResizeInc
+            let base = if (hints.flags & (1 << 9)) != 0 {
+                hints.base_height
+            } else {
+                0
+            };
             let diff = new_geom.height.saturating_sub(base);
             new_geom.height = base + (diff / hints.height_inc) * hints.height_inc;
         }
-        
+
         new_geom
     }
 }
@@ -173,6 +203,3 @@ impl Default for HintsManager {
         Self
     }
 }
-
-
-

@@ -1,6 +1,5 @@
 //! Window decorations (titlebars, buttons) for Area WM
 
-
 use anyhow::Result;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
@@ -19,7 +18,11 @@ fn debug_log(location: &str, message: &str, data: serde_json::Value, hypothesis_
         "data": data,
         "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
     });
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("/home/bizkit/GitHub/area/.cursor/debug.log") {
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/home/bizkit/GitHub/area/.cursor/debug.log")
+    {
         let _ = writeln!(file, "{}", log_entry);
     }
 }
@@ -76,7 +79,7 @@ impl WindowFrame {
             y,
             width,
             height + decorations.titlebar_height,
-            decorations.border_width, 
+            decorations.border_width,
             WindowClass::INPUT_OUTPUT,
             0,
             &CreateWindowAux::new()
@@ -171,17 +174,22 @@ impl WindowFrame {
 
         // Reparent client into frame
         conn.reparent_window(client, frame, 0, decorations.titlebar_height as i16)?;
-        
+
         // #region agent log
-        debug_log("decorations.rs:157", "Frame created, about to map", serde_json::json!({
-            "client": client,
-            "frame": frame,
-            "titlebar": titlebar,
-            "width": width,
-            "height": height
-        }), "A");
+        debug_log(
+            "decorations.rs:157",
+            "Frame created, about to map",
+            serde_json::json!({
+                "client": client,
+                "frame": frame,
+                "titlebar": titlebar,
+                "width": width,
+                "height": height
+            }),
+            "A",
+        );
         // #endregion
-        
+
         // Map all windows (frame first, then client)
         conn.map_window(frame)?;
         conn.map_window(close_button)?;
@@ -190,13 +198,18 @@ impl WindowFrame {
         conn.map_window(titlebar)?;
         // Map the client window so it's visible
         conn.map_window(client)?;
-        
+
         // #region agent log
-        debug_log("decorations.rs:170", "Frame windows mapped", serde_json::json!({
-            "client": client,
-            "frame": frame,
-            "all_mapped": true
-        }), "A");
+        debug_log(
+            "decorations.rs:170",
+            "Frame windows mapped",
+            serde_json::json!({
+                "client": client,
+                "frame": frame,
+                "all_mapped": true
+            }),
+            "A",
+        );
         // #endregion
 
         Ok(Self {
@@ -232,7 +245,13 @@ impl WindowFrame {
     }
 
     /// Resize the frame and client
-    pub fn resize(&self, conn: &RustConnection, width: u16, height: u16, decorations: &crate::config::WindowDecorationConfig) -> Result<()> {
+    pub fn resize(
+        &self,
+        conn: &RustConnection,
+        width: u16,
+        height: u16,
+        decorations: &crate::config::WindowDecorationConfig,
+    ) -> Result<()> {
         conn.configure_window(
             self.frame,
             &ConfigureWindowAux::new()

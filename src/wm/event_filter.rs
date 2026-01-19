@@ -32,10 +32,10 @@ pub struct EventFilterManager {
 pub struct FilterRule {
     /// Window ID (None = all windows)
     pub window: Option<u32>,
-    
+
     /// Event type (None = all events)
     pub event_type: Option<u16>,
-    
+
     /// Action
     pub action: FilterStatus,
 }
@@ -43,17 +43,11 @@ pub struct FilterRule {
 impl EventFilterManager {
     /// Create a new event filter manager
     pub fn new() -> Self {
-        Self {
-            rules: Vec::new(),
-        }
+        Self { rules: Vec::new() }
     }
-    
+
     /// Filter an event
-    pub fn filter_event(
-        &self,
-        event: &Event,
-        window: u32,
-    ) -> FilterStatus {
+    pub fn filter_event(&self, event: &Event, window: u32) -> FilterStatus {
         // Check rules
         for rule in &self.rules {
             if let Some(rule_window) = rule.window {
@@ -61,21 +55,21 @@ impl EventFilterManager {
                     continue;
                 }
             }
-            
+
             // TODO: Check event type
-            
+
             return rule.action;
         }
-        
+
         // Default: pass
         FilterStatus::Pass
     }
-    
+
     /// Add a filter rule
     pub fn add_rule(&mut self, rule: FilterRule) {
         self.rules.push(rule);
     }
-    
+
     /// Remove filter rules
     pub fn clear_rules(&mut self) {
         self.rules.clear();
@@ -87,4 +81,3 @@ impl Default for EventFilterManager {
         Self::new()
     }
 }
-

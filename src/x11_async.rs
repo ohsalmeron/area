@@ -2,13 +2,13 @@
 //!
 //! Provides non-blocking async X11 event polling using mio, following LeftWM's proven architecture.
 
+use anyhow::{Context, Result};
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
-use anyhow::{Context, Result};
 use tokio::sync::{Notify, oneshot};
-use x11rb::rust_connection::RustConnection;
 use x11rb::protocol::Event;
+use x11rb::rust_connection::RustConnection;
 
 /// X11 event stream with async polling support
 ///
@@ -30,13 +30,12 @@ impl X11EventStream {
         let fd = conn.stream().as_raw_fd();
         let notify = Arc::new(Notify::new());
         let task_notify = notify.clone();
-        
+
         // Spawn mio polling thread (like LeftWM)
         let (guard, task_guard) = oneshot::channel::<()>();
-        let mut poll = mio::Poll::new()
-            .context("Failed to create mio Poll")?;
+        let mut poll = mio::Poll::new().context("Failed to create mio Poll")?;
         let mut events = mio::Events::with_capacity(1);
-        
+
         poll.registry()
             .register(
                 &mut mio::unix::SourceFd(&fd),
@@ -44,7 +43,7 @@ impl X11EventStream {
                 mio::Interest::READABLE,
             )
             .context("Failed to register X11 FD with mio")?;
-        
+
         let timeout = Duration::from_millis(100);
         tokio::task::spawn_blocking(move || {
             loop {
@@ -52,26 +51,26 @@ impl X11EventStream {
                     tracing::info!("X11 socket polling thread shutting down");
                     return;
                 }
-                
+
                 if let Err(err) = poll.poll(&mut events, Some(timeout)) {
                     tracing::warn!("X11 socket poll failed: {:?}", err);
                     continue;
                 }
-                
+
                 events
                     .iter()
                     .filter(|event| event.token() == mio::Token(0))
                     .for_each(|_| task_notify.notify_one());
             }
         });
-        
+
         Ok(Self {
             conn,
             notify,
             _task_guard: task_guard,
         })
     }
-    
+
     /// Non-blocking: poll for events (drains internal buffer)
     ///
     /// Returns `Some(event)` if an event is available, `None` if the buffer is empty.
@@ -80,7 +79,7 @@ impl X11EventStream {
         use x11rb::connection::Connection;
         Ok(self.conn.as_ref().poll_for_event()?)
     }
-    
+
     /// Async wait for X11 FD to become readable
     ///
     /// Returns when the background mio thread detects that the X11 file descriptor
@@ -89,7 +88,7 @@ impl X11EventStream {
     pub async fn wait_readable(&self) {
         self.notify.notified().await;
     }
-    
+
     /// Flush X11 requests (batch optimization)
     ///
     /// Flushes all pending X11 requests to the server. Should be called at the
@@ -100,4 +99,3 @@ impl X11EventStream {
         Ok(())
     }
 }
-

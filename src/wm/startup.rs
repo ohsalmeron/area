@@ -20,13 +20,13 @@ use crate::wm::screen::ScreenInfo;
 pub struct StartupNotification {
     /// Startup ID
     pub startup_id: String,
-    
+
     /// Window ID (if mapped)
     pub window: Option<u32>,
-    
+
     /// Timestamp
     pub timestamp: u32,
-    
+
     /// Is complete?
     pub complete: bool,
 }
@@ -35,7 +35,7 @@ pub struct StartupNotification {
 pub struct StartupNotificationManager {
     /// Active startup notifications
     pub notifications: HashMap<String, StartupNotification>,
-    
+
     /// Default cursor (for spinning)
     pub busy_cursor: Option<u32>,
 }
@@ -48,23 +48,22 @@ impl StartupNotificationManager {
             busy_cursor: None,
         }
     }
-    
+
     /// Register a startup notification
-    pub fn register_startup(
-        &mut self,
-        startup_id: String,
-        timestamp: u32,
-    ) {
+    pub fn register_startup(&mut self, startup_id: String, timestamp: u32) {
         debug!("Registering startup notification: {}", startup_id);
-        
-        self.notifications.insert(startup_id.clone(), StartupNotification {
-            startup_id: startup_id.clone(),
-            window: None,
-            timestamp,
-            complete: false,
-        });
+
+        self.notifications.insert(
+            startup_id.clone(),
+            StartupNotification {
+                startup_id: startup_id.clone(),
+                window: None,
+                timestamp,
+                complete: false,
+            },
+        );
     }
-    
+
     /// Associate window with startup notification
     pub fn associate_window(
         &mut self,
@@ -73,21 +72,24 @@ impl StartupNotificationManager {
         window: u32,
     ) -> Result<()> {
         // Get _NET_STARTUP_ID from window
-        if let Ok(reply) = conn.get_property(
-            false,
-            window,
-            atoms._net_wm_pid, // Use _NET_STARTUP_ID if available
-            AtomEnum::CARDINAL,
-            0,
-            1024,
-        )?.reply() {
+        if let Ok(reply) = conn
+            .get_property(
+                false,
+                window,
+                atoms._net_wm_pid, // Use _NET_STARTUP_ID if available
+                AtomEnum::CARDINAL,
+                0,
+                1024,
+            )?
+            .reply()
+        {
             // TODO: Parse startup ID and associate with window
             debug!("Associating window {} with startup notification", window);
         }
-        
+
         Ok(())
     }
-    
+
     /// Mark startup as complete
     pub fn mark_complete(&mut self, startup_id: &str) {
         if let Some(notification) = self.notifications.get_mut(startup_id) {
@@ -95,7 +97,7 @@ impl StartupNotificationManager {
             debug!("Startup notification {} marked as complete", startup_id);
         }
     }
-    
+
     /// Remove startup notification
     pub fn remove_startup(&mut self, startup_id: &str) {
         self.notifications.remove(startup_id);
@@ -107,6 +109,3 @@ impl Default for StartupNotificationManager {
         Self::new()
     }
 }
-
-
-

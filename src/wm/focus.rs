@@ -43,22 +43,22 @@ pub enum FocusSource {
 pub struct FocusManager {
     /// Currently focused window
     pub focused_window: Option<u32>,
-    
+
     /// Focus history (for Alt+Tab cycling)
     pub focus_history: VecDeque<u32>,
-    
+
     /// Maximum history size
     pub max_history_size: usize,
-    
+
     /// Focus policy
     pub focus_policy: FocusPolicy,
-    
+
     /// Focus stealing prevention enabled
     pub prevent_focus_stealing: bool,
-    
+
     /// Last user interaction time
     pub last_user_time: u32,
-    
+
     /// Focus stealing delay (milliseconds)
     pub focus_stealing_delay: u32,
 }
@@ -76,7 +76,7 @@ impl FocusManager {
             focus_stealing_delay: 250, // 250ms default
         }
     }
-    
+
     /// Set focus on a window
     pub fn set_focus(
         &mut self,
@@ -91,18 +91,18 @@ impl FocusManager {
             debug!("Focus stealing prevented for window {}", client.window);
             return Ok(());
         }
-        
+
         // Remove from history if already present
         self.focus_history.retain(|&w| w != client.window);
-        
+
         // Add to front of history
         self.focus_history.push_front(client.window);
-        
+
         // Limit history size
         while self.focus_history.len() > self.max_history_size {
             self.focus_history.pop_back();
         }
-        
+
         // Update focused window
         if let Some(old_focused) = self.focused_window {
             if old_focused != client.window {
@@ -110,34 +110,32 @@ impl FocusManager {
                 self.remove_focus(conn, display_info, screen_info, old_focused)?;
             }
         }
-        
+
         self.focused_window = Some(client.window);
-        
+
         // Set X11 focus
-        conn.set_input_focus(
-            InputFocus::POINTER_ROOT,
-            client.window,
-            x11rb::CURRENT_TIME,
-        )?;
-        
+        conn.set_input_focus(InputFocus::POINTER_ROOT, client.window, x11rb::CURRENT_TIME)?;
+
         // Raise window
         conn.configure_window(
             client.window,
             &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
         )?;
-        
+
         // Update client flags
         client.set_focused(true);
         client.xfwm_flags.insert(XfwmFlags::FOCUS);
-        
+
         // Update _NET_ACTIVE_WINDOW
-        display_info.atoms.update_active_window(conn, screen_info.root, Some(client.window))?;
-        
+        display_info
+            .atoms
+            .update_active_window(conn, screen_info.root, Some(client.window))?;
+
         debug!("Set focus on window {}", client.window);
-        
+
         Ok(())
     }
-    
+
     /// Remove focus from a window
     pub fn remove_focus(
         &mut self,
@@ -148,22 +146,24 @@ impl FocusManager {
     ) -> Result<()> {
         if self.focused_window == Some(window) {
             self.focused_window = None;
-            
+
             // Update _NET_ACTIVE_WINDOW (set to None)
-            display_info.atoms.update_active_window(conn, screen_info.root, None)?;
-            
+            display_info
+                .atoms
+                .update_active_window(conn, screen_info.root, None)?;
+
             debug!("Removed focus from window {}", window);
         }
-        
+
         Ok(())
     }
-    
+
     /// Check if focus stealing is allowed
     pub fn focus_stealing_allowed(&self, client: &Client, source: FocusSource) -> bool {
         if !self.prevent_focus_stealing {
             return true;
         }
-        
+
         // Always allow if user recently interacted
         let current_time = x11rb::CURRENT_TIME; // TODO: Get actual current time
         if current_time != 0 && self.last_user_time != 0 {
@@ -172,7 +172,7 @@ impl FocusManager {
                 return true;
             }
         }
-        
+
         // Allow if source is user action (pager, panel)
         match source {
             FocusSource::Pager | FocusSource::Other => return true,
@@ -181,18 +181,18 @@ impl FocusManager {
                 if client.flags.contains(ClientFlags::DEMANDS_ATTENTION) {
                     return true;
                 }
-                
+
                 // Check if window is modal
                 if client.flags.contains(ClientFlags::STATE_MODAL) {
                     return true;
                 }
-                
+
                 // Otherwise, prevent focus stealing
                 return false;
             }
         }
     }
-    
+
     /// Handle _NET_ACTIVE_WINDOW request
     pub fn handle_net_active_window(
         &mut self,
@@ -204,33 +204,36 @@ impl FocusManager {
         current_time: u32,
         clients: &mut std::collections::HashMap<u32, Client>,
     ) -> Result<()> {
-        debug!("_NET_ACTIVE_WINDOW request for window {} (source={:?})", window, source);
-        
+        debug!(
+            "_NET_ACTIVE_WINDOW request for window {} (source={:?})",
+            window, source
+        );
+
         if let Some(client) = clients.get_mut(&window) {
             // Check if window is on current workspace
             // TODO: Implement workspace switching if needed
-            
+
             // Set focus
             self.set_focus(conn, display_info, screen_info, client, source)?;
         } else {
             warn!("_NET_ACTIVE_WINDOW: window {} not found", window);
         }
-        
+
         Ok(())
     }
-    
+
     /// Update last user interaction time
     pub fn update_user_time(&mut self, time: u32) {
         if time != 0 {
             self.last_user_time = time;
         }
     }
-    
+
     /// Get focus history (for window cycling)
     pub fn get_focus_history(&self) -> &VecDeque<u32> {
         &self.focus_history
     }
-    
+
     /// Get currently focused window
     pub fn get_focused_window(&self) -> Option<u32> {
         self.focused_window
@@ -242,6 +245,3 @@ impl Default for FocusManager {
         Self::new()
     }
 }
-
-
-

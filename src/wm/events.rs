@@ -6,10 +6,10 @@
 use anyhow::Result;
 use tracing::{debug, info, warn};
 use x11rb::connection::Connection;
+use x11rb::protocol::Event;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
-use x11rb::protocol::Event;
 
 use crate::wm::client::Client;
 use crate::wm::display::DisplayInfo;
@@ -66,7 +66,7 @@ impl EventRouter {
             filter_status: EventFilterStatus::default(),
         }
     }
-    
+
     /// Route an event to the appropriate handler
     pub fn route_event(
         &mut self,
@@ -121,7 +121,7 @@ impl EventRouter {
                 debug!("CirculateNotify: window {}", e.window);
                 Ok(EventResult::Continue)
             }
-            
+
             // Focus events
             Event::FocusIn(e) => {
                 debug!("FocusIn: window {}", e.event);
@@ -131,7 +131,7 @@ impl EventRouter {
                 debug!("FocusOut: window {}", e.event);
                 Ok(EventResult::Continue)
             }
-            
+
             // Input events
             Event::ButtonPress(e) => {
                 debug!("ButtonPress: window {}, button {}", e.event, e.detail);
@@ -162,52 +162,63 @@ impl EventRouter {
                 debug!("LeaveNotify: window {}", e.event);
                 Ok(EventResult::Continue)
             }
-            
+
             // Property events
             Event::PropertyNotify(e) => {
                 debug!("PropertyNotify: window {}, atom {}", e.window, e.atom);
                 Ok(EventResult::Continue)
             }
-            
+
             // Client messages (EWMH)
             Event::ClientMessage(e) => {
                 debug!("ClientMessage: window {}, type {}", e.window, e.type_);
                 Ok(EventResult::Continue)
             }
-            
+
             // Selection events
             Event::SelectionClear(e) => {
-                debug!("SelectionClear: owner {}, selection {}", e.owner, e.selection);
+                debug!(
+                    "SelectionClear: owner {}, selection {}",
+                    e.owner, e.selection
+                );
                 Ok(EventResult::Continue)
             }
             Event::SelectionNotify(e) => {
-                debug!("SelectionNotify: requestor {}, selection {}", e.requestor, e.selection);
+                debug!(
+                    "SelectionNotify: requestor {}, selection {}",
+                    e.requestor, e.selection
+                );
                 Ok(EventResult::Continue)
             }
             Event::SelectionRequest(e) => {
-                debug!("SelectionRequest: owner {}, selection {}", e.owner, e.selection);
+                debug!(
+                    "SelectionRequest: owner {}, selection {}",
+                    e.owner, e.selection
+                );
                 Ok(EventResult::Continue)
             }
-            
+
             // Colormap events
             Event::ColormapNotify(e) => {
                 debug!("ColormapNotify: window {}", e.window);
                 Ok(EventResult::Continue)
             }
-            
+
             // Shape extension events
             Event::ShapeNotify(e) => {
                 debug!("ShapeNotify: affected_window {}", e.affected_window);
                 Ok(EventResult::Continue)
             }
-            
+
             // Error events
             Event::Error(e) => {
-                warn!("X11 Error: error_code={}, request_code={}, minor_code={}",
-                    e.error_code, e.major_opcode, e.minor_opcode);
+                warn!(
+                    "X11 Error: error_code={}, request_code={}, minor_code={}",
+                    e.error_code, e.major_opcode, e.minor_opcode
+                );
                 Ok(EventResult::Handled)
             }
-            
+
             // Unknown events
             _ => {
                 debug!("Unknown event type: {:?}", event);
@@ -232,7 +243,7 @@ impl EventRouter {
             EventFilterStatus::Remove => true,
         }
     }
-    
+
     /// Get event timestamp
     pub fn get_event_timestamp(event: &Event) -> u32 {
         match event {
@@ -248,7 +259,7 @@ impl EventRouter {
             _ => x11rb::CURRENT_TIME,
         }
     }
-    
+
     /// Get event window
     pub fn get_event_window(event: &Event) -> Option<u32> {
         match event {
@@ -284,4 +295,3 @@ impl EventRouter {
         }
     }
 }
-

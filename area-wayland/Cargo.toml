@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "compositor",
+    "clients/panel",
+    "clients/launcher",
+    "clients/desktop",
+    "clients/notifications",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Area Team"]
+license = "MIT"
+repository = "https://github.com/ohsalmeron/area"
+
+[workspace.dependencies]
+# Core compositor dependencies - matching Niri's pattern
+smithay = { git = "https://github.com/Smithay/smithay.git", default-features = false }
+smithay-drm-extras = { git = "https://github.com/Smithay/smithay.git" }
+calloop = { version = "0.14.3", features = ["executor", "futures-io", "signals"] }
+wayland-server = "0.31"
+wayland-client = "0.31"
+wayland-protocols = "0.31"
+wayland-backend = "0.3.11"
+wayland-scanner = "0.31.7"
+
+# Rendering
+wgpu = "0.19"
+cairo-rs = "0.19"
+pango = "0.21.5"
+pangocairo = "0.21.5"
+
+# Input - using input crate like Niri
+input = { version = "0.9.1", features = ["libinput_1_21"] }
+
+# Utilities
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Client dependencies
+iced = { version = "0.12", features = ["svg", "image", "tokio"] }
+fuzzy-matcher = "0.3"
+freedesktop-desktop-entry = "0.6"
+xdg = "2.5"
+walkdir = "2"
+linicon = "2"

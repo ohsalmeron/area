@@ -1,7 +1,7 @@
 //! Logout dialog implementation
 
-use anyhow::Result;
 use crate::shell::render;
+use anyhow::Result;
 
 /// Dialog configuration
 const DIALOG_WIDTH: f32 = 300.0;
@@ -14,19 +14,19 @@ const BUTTON_SPACING: f32 = 20.0;
 pub struct LogoutDialog {
     /// Is dialog visible?
     pub visible: bool,
-    
+
     /// Dialog position (centered)
     dialog_x: f32,
     dialog_y: f32,
-    
+
     /// Logout button position
     logout_button_x: f32,
     logout_button_y: f32,
-    
+
     /// Cancel button position
     cancel_button_x: f32,
     cancel_button_y: f32,
-    
+
     /// Screen dimensions (for centering)
     screen_width: u16,
     screen_height: u16,
@@ -47,36 +47,36 @@ impl LogoutDialog {
             screen_height: 1080,
         }
     }
-    
+
     /// Show the dialog
     pub fn show(&mut self) {
         self.visible = true;
         self.update_positions();
     }
-    
+
     /// Hide the dialog
     pub fn hide(&mut self) {
         self.visible = false;
     }
-    
+
     /// Update button positions (call when screen size changes)
     pub fn update_positions(&mut self) {
         // Center dialog
         self.dialog_x = (self.screen_width as f32 - DIALOG_WIDTH) / 2.0;
         self.dialog_y = (self.screen_height as f32 - DIALOG_HEIGHT) / 2.0;
-        
+
         // Position buttons
         let button_y = self.dialog_y + DIALOG_HEIGHT - BUTTON_HEIGHT - 20.0;
         let total_buttons_width = BUTTON_WIDTH * 2.0 + BUTTON_SPACING;
         let start_x = self.dialog_x + (DIALOG_WIDTH - total_buttons_width) / 2.0;
-        
+
         self.logout_button_x = start_x;
         self.logout_button_y = button_y;
-        
+
         self.cancel_button_x = start_x + BUTTON_WIDTH + BUTTON_SPACING;
         self.cancel_button_y = button_y;
     }
-    
+
     /// Set screen dimensions
     pub fn set_screen_size(&mut self, width: u16, height: u16) {
         self.screen_width = width;
@@ -85,16 +85,21 @@ impl LogoutDialog {
             self.update_positions();
         }
     }
-    
+
     /// Handle mouse click
-    pub async fn handle_click(&mut self, x: i16, y: i16, power: &Option<crate::dbus::power::PowerService>) -> Result<bool> {
+    pub async fn handle_click(
+        &mut self,
+        x: i16,
+        y: i16,
+        power: &Option<crate::dbus::power::PowerService>,
+    ) -> Result<bool> {
         if !self.visible {
             return Ok(false);
         }
-        
+
         let fx = x as f32;
         let fy = y as f32;
-        
+
         // Check if click is on logout button
         if render::point_in_rect(
             fx,
@@ -110,7 +115,7 @@ impl LogoutDialog {
                 // In a real desktop, we'd probably want a confirmation or options (Reboot/Suspend)
                 // For this MVP, let's map "Logout" to "Shutdown" if power management is available,
                 // or just "Exit Area" if we want to be safe.
-                
+
                 // Let's implement real shutdown for "Desktop Integration" proof
                 if let Err(e) = power_svc.shutdown().await {
                     tracing::error!("Failed to shutdown via D-Bus: {}", e);
@@ -118,11 +123,11 @@ impl LogoutDialog {
                     std::process::exit(1);
                 }
             } else {
-                 std::process::exit(0);
+                std::process::exit(0);
             }
             return Ok(true);
         }
-        
+
         // Check if click is on cancel button
         if render::point_in_rect(
             fx,
@@ -135,7 +140,7 @@ impl LogoutDialog {
             self.hide();
             return Ok(true);
         }
-        
+
         // Check if click is outside dialog (close dialog)
         if !render::point_in_rect(
             fx,
@@ -148,24 +153,28 @@ impl LogoutDialog {
             self.hide();
             return Ok(true);
         }
-        
+
         Ok(false)
     }
-    
+
     /// Perform logout (Unused for now, logic moved to handle_click)
     fn _perform_logout(&self) -> Result<()> {
         Ok(())
     }
-    
-    
+
     /// Render the dialog using the renderer
-    pub fn render(&self, renderer: &crate::compositor::renderer::Renderer, screen_width: f32, screen_height: f32) {
+    pub fn render(
+        &self,
+        renderer: &crate::compositor::renderer::Renderer,
+        screen_width: f32,
+        screen_height: f32,
+    ) {
         if !self.visible {
             return;
         }
-        
+
         let border_width = 2.0;
-        
+
         // Render dialog background
         renderer.render_rectangle(
             self.dialog_x,
@@ -174,15 +183,62 @@ impl LogoutDialog {
             DIALOG_HEIGHT,
             screen_width,
             screen_height,
-            0.15, 0.15, 0.15, 0.95,
+            0.15,
+            0.15,
+            0.15,
+            0.95,
         );
-        
+
         // Render dialog border
-        renderer.render_rectangle(self.dialog_x, self.dialog_y, DIALOG_WIDTH, border_width, screen_width, screen_height, 0.4, 0.4, 0.4, 1.0); // top
-        renderer.render_rectangle(self.dialog_x, self.dialog_y + DIALOG_HEIGHT - border_width, DIALOG_WIDTH, border_width, screen_width, screen_height, 0.4, 0.4, 0.4, 1.0); // bottom
-        renderer.render_rectangle(self.dialog_x, self.dialog_y, border_width, DIALOG_HEIGHT, screen_width, screen_height, 0.4, 0.4, 0.4, 1.0); // left
-        renderer.render_rectangle(self.dialog_x + DIALOG_WIDTH - border_width, self.dialog_y, border_width, DIALOG_HEIGHT, screen_width, screen_height, 0.4, 0.4, 0.4, 1.0); // right
-        
+        renderer.render_rectangle(
+            self.dialog_x,
+            self.dialog_y,
+            DIALOG_WIDTH,
+            border_width,
+            screen_width,
+            screen_height,
+            0.4,
+            0.4,
+            0.4,
+            1.0,
+        ); // top
+        renderer.render_rectangle(
+            self.dialog_x,
+            self.dialog_y + DIALOG_HEIGHT - border_width,
+            DIALOG_WIDTH,
+            border_width,
+            screen_width,
+            screen_height,
+            0.4,
+            0.4,
+            0.4,
+            1.0,
+        ); // bottom
+        renderer.render_rectangle(
+            self.dialog_x,
+            self.dialog_y,
+            border_width,
+            DIALOG_HEIGHT,
+            screen_width,
+            screen_height,
+            0.4,
+            0.4,
+            0.4,
+            1.0,
+        ); // left
+        renderer.render_rectangle(
+            self.dialog_x + DIALOG_WIDTH - border_width,
+            self.dialog_y,
+            border_width,
+            DIALOG_HEIGHT,
+            screen_width,
+            screen_height,
+            0.4,
+            0.4,
+            0.4,
+            1.0,
+        ); // right
+
         // Render logout button (red)
         renderer.render_rectangle(
             self.logout_button_x,
@@ -191,13 +247,60 @@ impl LogoutDialog {
             BUTTON_HEIGHT,
             screen_width,
             screen_height,
-            0.6, 0.2, 0.2, 0.9,
+            0.6,
+            0.2,
+            0.2,
+            0.9,
         );
-        renderer.render_rectangle(self.logout_button_x, self.logout_button_y, BUTTON_WIDTH, border_width, screen_width, screen_height, 0.8, 0.3, 0.3, 1.0); // top border
-        renderer.render_rectangle(self.logout_button_x, self.logout_button_y + BUTTON_HEIGHT - border_width, BUTTON_WIDTH, border_width, screen_width, screen_height, 0.8, 0.3, 0.3, 1.0); // bottom border
-        renderer.render_rectangle(self.logout_button_x, self.logout_button_y, border_width, BUTTON_HEIGHT, screen_width, screen_height, 0.8, 0.3, 0.3, 1.0); // left border
-        renderer.render_rectangle(self.logout_button_x + BUTTON_WIDTH - border_width, self.logout_button_y, border_width, BUTTON_HEIGHT, screen_width, screen_height, 0.8, 0.3, 0.3, 1.0); // right border
-        
+        renderer.render_rectangle(
+            self.logout_button_x,
+            self.logout_button_y,
+            BUTTON_WIDTH,
+            border_width,
+            screen_width,
+            screen_height,
+            0.8,
+            0.3,
+            0.3,
+            1.0,
+        ); // top border
+        renderer.render_rectangle(
+            self.logout_button_x,
+            self.logout_button_y + BUTTON_HEIGHT - border_width,
+            BUTTON_WIDTH,
+            border_width,
+            screen_width,
+            screen_height,
+            0.8,
+            0.3,
+            0.3,
+            1.0,
+        ); // bottom border
+        renderer.render_rectangle(
+            self.logout_button_x,
+            self.logout_button_y,
+            border_width,
+            BUTTON_HEIGHT,
+            screen_width,
+            screen_height,
+            0.8,
+            0.3,
+            0.3,
+            1.0,
+        ); // left border
+        renderer.render_rectangle(
+            self.logout_button_x + BUTTON_WIDTH - border_width,
+            self.logout_button_y,
+            border_width,
+            BUTTON_HEIGHT,
+            screen_width,
+            screen_height,
+            0.8,
+            0.3,
+            0.3,
+            1.0,
+        ); // right border
+
         // Render cancel button (gray)
         renderer.render_rectangle(
             self.cancel_button_x,
@@ -206,15 +309,61 @@ impl LogoutDialog {
             BUTTON_HEIGHT,
             screen_width,
             screen_height,
-            0.3, 0.3, 0.3, 0.9,
+            0.3,
+            0.3,
+            0.3,
+            0.9,
         );
-        renderer.render_rectangle(self.cancel_button_x, self.cancel_button_y, BUTTON_WIDTH, border_width, screen_width, screen_height, 0.5, 0.5, 0.5, 1.0); // top border
-        renderer.render_rectangle(self.cancel_button_x, self.cancel_button_y + BUTTON_HEIGHT - border_width, BUTTON_WIDTH, border_width, screen_width, screen_height, 0.5, 0.5, 0.5, 1.0); // bottom border
-        renderer.render_rectangle(self.cancel_button_x, self.cancel_button_y, border_width, BUTTON_HEIGHT, screen_width, screen_height, 0.5, 0.5, 0.5, 1.0); // left border
-        renderer.render_rectangle(self.cancel_button_x + BUTTON_WIDTH - border_width, self.cancel_button_y, border_width, BUTTON_HEIGHT, screen_width, screen_height, 0.5, 0.5, 0.5, 1.0); // right border
-        
+        renderer.render_rectangle(
+            self.cancel_button_x,
+            self.cancel_button_y,
+            BUTTON_WIDTH,
+            border_width,
+            screen_width,
+            screen_height,
+            0.5,
+            0.5,
+            0.5,
+            1.0,
+        ); // top border
+        renderer.render_rectangle(
+            self.cancel_button_x,
+            self.cancel_button_y + BUTTON_HEIGHT - border_width,
+            BUTTON_WIDTH,
+            border_width,
+            screen_width,
+            screen_height,
+            0.5,
+            0.5,
+            0.5,
+            1.0,
+        ); // bottom border
+        renderer.render_rectangle(
+            self.cancel_button_x,
+            self.cancel_button_y,
+            border_width,
+            BUTTON_HEIGHT,
+            screen_width,
+            screen_height,
+            0.5,
+            0.5,
+            0.5,
+            1.0,
+        ); // left border
+        renderer.render_rectangle(
+            self.cancel_button_x + BUTTON_WIDTH - border_width,
+            self.cancel_button_y,
+            border_width,
+            BUTTON_HEIGHT,
+            screen_width,
+            screen_height,
+            0.5,
+            0.5,
+            0.5,
+            1.0,
+        ); // right border
+
         // TODO: Render text ("Logout", "Cancel", "Are you sure?")
         // For now, buttons are just colored rectangles
     }
 }
-
